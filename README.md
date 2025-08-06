@@ -32,12 +32,24 @@ PDF Upload → Text Extraction → Content Analysis → Script Generation → Vo
 
 ## 🚀 Quick Start
 
-### 1. **Installation**
+### 1. **Installation with UV (Recommended)**
 ```bash
 # Clone or download this directory
 cd async_podcast
 
-# Install dependencies
+# Install UV if not already installed
+pip install uv
+
+# Install dependencies with UV (faster and more reliable)
+uv sync
+
+# Or use the setup script
+python setup.py
+```
+
+### **Alternative: Traditional pip**
+```bash
+# Install dependencies with pip
 pip install -r requirements.txt
 ```
 
@@ -57,7 +69,13 @@ nano .env
 
 ### 3. **Launch**
 ```bash
-# Start the application
+# Option 1: Use UV runner (recommended)
+python run.py
+
+# Option 2: Direct UV execution
+uv run python debate2.py
+
+# Option 3: Traditional method
 python debate2.py
 ```
 
@@ -88,6 +106,8 @@ Open your browser to: **http://localhost:7900**
 ```
 async_podcast/
 ├── debate2.py                          # Main Gradio application
+├── run.py                              # UV-optimized runner
+├── setup.py                            # Setup script with UV support
 ├── controller/
 │   ├── config.py                       # Configuration management
 │   ├── utils.py                        # PDF processing utilities
@@ -95,8 +115,11 @@ async_podcast/
 │   ├── script_generator_async.py       # Async script generation
 │   ├── voice_generator_async.py        # Async voice synthesis
 │   └── audio_processor_async.py        # Async audio processing
-├── requirements.txt                    # Python dependencies
+├── pyproject.toml                      # UV project configuration
+├── uv.lock                             # UV lock file
+├── requirements.txt                    # Legacy pip dependencies
 ├── .env.example                        # Environment template
+├── QUICKSTART.md                       # Quick start guide
 └── README.md                          # This file
 ```
 
@@ -178,6 +201,35 @@ ELEVENLABS_MODEL=eleven_flash_v2_5
 - **Stable Internet**: Concurrent API calls require good connectivity
 - **Sufficient RAM**: 4GB+ recommended for larger documents
 
+## 🚀 UV Package Manager Benefits
+
+This project now uses **UV** for faster, more reliable dependency management:
+
+### **Why UV?**
+- **⚡ 10-100x faster** than pip for dependency resolution
+- **🔒 Deterministic builds** with lockfile support
+- **🎯 Better dependency resolution** prevents conflicts
+- **📦 Unified toolchain** for Python project management
+- **🔄 Seamless pip compatibility** - works with existing requirements.txt
+
+### **UV Commands**
+```bash
+# Install dependencies
+uv sync
+
+# Add new dependency
+uv add package-name
+
+# Add development dependency
+uv add --dev pytest
+
+# Run scripts with UV
+uv run python script.py
+
+# Update all dependencies
+uv lock --upgrade
+```
+
 ## 🔄 Updates & Support
 
 This is a production-ready application with:
@@ -186,9 +238,10 @@ This is a production-ready application with:
 - ✅ **Professional UI/UX**
 - ✅ **Production logging**
 - ✅ **Resource management**
+- ✅ **Modern UV package management**
 
 For issues or enhancements, check the main project repository or create a new issue.
 
 ---
 
-**🎉 Ready to transform your documents into engaging podcasts!**
+**🎉 Ready to transform your documents into engaging podcasts with UV!**

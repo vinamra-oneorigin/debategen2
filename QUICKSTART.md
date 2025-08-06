@@ -1,10 +1,15 @@
-# 🚀 Quick Start Guide
+# 🚀 Quick Start Guide (UV)
 
-## Get Running in 3 Steps
+## Get Running in 3 Steps with UV Package Manager
+
+**Requirements:** Python 3.10+ (due to Gradio 5.0+ dependency)
 
 ### 1. **Setup**
 ```bash
-cd async_podcast
+# Install UV if not already installed
+pip install uv
+
+# Setup project
 python setup.py
 ```
 
@@ -22,7 +27,7 @@ nano .env
 
 ### 3. **Launch**
 ```bash
-python debate2.py
+uv run run.py
 ```
 
 **Open:** http://localhost:7900
