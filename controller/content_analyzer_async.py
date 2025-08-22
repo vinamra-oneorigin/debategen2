@@ -1,413 +1,237 @@
 """
 content_analyzer_async.py
 
-Asynchronous Content Analysis for Podcast Debate Pipeline
+Asynchronous content analysis utilities used by both the API and Gradio app.
 
-- Concurrent GPT-4.1-mini processing for document analysis
-- Rate limiting and retry logic with tenacity
-- Optimized for production speed and reliability
+- Chunking long PDF text into GPT-sized chunks
+- Analyzing content (key points + overall summary) across chunks
+- Summarizing the generated podcast transcript for context
 """
 
-import re
-import json
 import asyncio
+import json
+from typing import Any, Dict, List, Optional
+
 import aiohttp
-from typing import List, Dict, Optional, Any
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
-from controller.config import get_openai_api_key, get_openai_model, MAX_TOKENS
 
-# Rate limiting for OpenAI API calls
-MAX_CONCURRENT_API_CALLS = 3
-API_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_API_CALLS)
+from controller.config import (
+	get_openai_api_key,
+	get_openai_model,
+	CHUNK_SIZE,
+)
 
-def chunk_text_for_gpt(text: str, max_tokens: int = 4096, overlap: int = 200) -> List[str]:
-    """
-    Splits text into chunks suitable for GPT-4.1-mini API, preserving paragraph boundaries and context.
-    """
-    max_chars = max_tokens * 4
-    overlap_chars = overlap * 4
 
-    paragraphs = re.split(r"\n\s*\n", text)
-    chunks = []
-    current_chunk = ""
-    
-    for para in paragraphs:
-        if len(current_chunk) + len(para) + 2 <= max_chars:
-            current_chunk += para + "\n\n"
-        else:
-            if current_chunk:
-                chunks.append(current_chunk.strip())
-            if chunks and overlap_chars > 0:
-                overlap_text = current_chunk[-overlap_chars:]
-                current_chunk = overlap_text + para + "\n\n"
-            else:
-                current_chunk = para + "\n\n"
-    
-    if current_chunk.strip():
-        chunks.append(current_chunk.strip())
-    
-    return chunks
+# Limit concurrent requests to avoid rate limits
+MAX_CONCURRENT_REQUESTS = 3
+API_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+
+
+def chunk_text_for_gpt(text: str, max_tokens: int = 4000) -> List[str]:
+	"""
+	Naive text chunker using character counts as an approximation for tokens.
+	Uses CHUNK_SIZE from config as the base size and respects max_tokens as an upper bound.
+	"""
+	if not text:
+		return []
+
+	# Simple heuristic: ~4 chars per token → keep chunks conservatively small
+	approx_chars_per_token = 4
+	max_chars = min(CHUNK_SIZE, max_tokens) * approx_chars_per_token
+	max_chars = max(2000, max_chars)  # ensure a reasonable minimum
+
+	chunks: List[str] = []
+	start = 0
+	while start < len(text):
+		end = min(start + max_chars, len(text))
+		# Try to break at a paragraph boundary if possible
+		slice_text = text[start:end]
+		last_break = slice_text.rfind("\n\n")
+		if last_break > 500:  # keep chunks reasonably sized, avoid tiny last piece
+			end = start + last_break
+			slice_text = text[start:end]
+		chunks.append(slice_text.strip())
+		start = end
+
+	# Filter any empties
+	return [c for c in chunks if c]
+
 
 @retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=4, max=10),
-    retry=retry_if_exception_type((aiohttp.ClientError, asyncio.TimeoutError))
+	stop=stop_after_attempt(3),
+	wait=wait_exponential(multiplier=1, min=2, max=10),
+	retry=retry_if_exception_type((aiohttp.ClientError, asyncio.TimeoutError))
 )
-async def make_openai_request(
-    session: aiohttp.ClientSession,
-    prompt: str,
-    response_schema: Dict[str, Any],
-    model: Optional[str] = None,
-    max_tokens: int = 512
+async def _openai_json_call(
+	session: aiohttp.ClientSession,
+	prompt: str,
+	response_schema: Dict[str, Any],
+	max_tokens: int = 512,
+	temperature: float = 0.3,
 ) -> Dict[str, Any]:
-    """
-    Make async OpenAI API request with retry logic and rate limiting.
-    """
-    async with API_SEMAPHORE:
-        if model is None:
-            model = get_openai_model()
-        
-        headers = {
-            "Authorization": f"Bearer {get_openai_api_key()}",
-            "Content-Type": "application/json"
-        }
-        
-        payload = {
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": max_tokens,
-            "temperature": 0.2,
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": response_schema
-            }
-        }
-        
-        async with session.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=30
-        ) as response:
-            if response.status == 200:
-                result = await response.json()
-                content = result["choices"][0]["message"]["content"]
-                if not content:
-                    raise ValueError("No content returned from OpenAI API")
-                return json.loads(content)
-            else:
-                error_text = await response.text()
-                raise aiohttp.ClientError(f"OpenAI API failed: {response.status} {error_text}")
+	"""
+	Make an async call to OpenAI Chat Completions API expecting JSON via response_format json_schema.
+	"""
+	async with API_SEMAPHORE:
+		headers = {
+			"Authorization": f"Bearer {get_openai_api_key()}",
+			"Content-Type": "application/json",
+		}
+		payload = {
+			"model": get_openai_model(),
+			"messages": [{"role": "user", "content": prompt}],
+			"max_tokens": max_tokens,
+			"temperature": temperature,
+			"response_format": {"type": "json_schema", "json_schema": response_schema},
+		}
+		async with session.post(
+			"https://api.openai.com/v1/chat/completions",
+			headers=headers,
+			json=payload,
+			timeout=45,
+		) as resp:
+			if resp.status == 200:
+				result = await resp.json()
+				content = result["choices"][0]["message"]["content"]
+				return json.loads(content)
+			else:
+				raise aiohttp.ClientError(f"OpenAI error {resp.status}: {await resp.text()}")
 
-async def analyze_content_structure_async(text: str, model: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Analyzes document structure using GPT-4.1-mini with async processing.
-    """
-    # Extract potential headings using regex
-    headings = []
-    for line in text.splitlines():
-        if re.match(r"^\s*([A-Z][A-Z\s\d\.\-:]{3,}|[0-9]+\.\s+.+)$", line.strip()):
-            headings.append(line.strip())
-    
-    prompt = (
-        "Analyze the following document content and identify its structure. "
-        "Identify sections with headings and subheadings if present. "
-        "Infer the hierarchy and organization of the document. "
-        "Document content:\n"
-        "-----\n"
-        f"{text[:6000]}\n"
-        "-----"
-    )
-    
-    schema = {
-        "name": "document_structure",
-        "strict": True,
-        "schema": {
-            "type": "object",
-            "properties": {
-                "sections": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "heading": {"type": "string"},
-                            "subheadings": {
-                                "type": "array",
-                                "items": {"type": "string"}
-                            }
-                        },
-                        "required": ["heading", "subheadings"],
-                        "additionalProperties": False
-                    }
-                }
-            },
-            "required": ["sections"],
-            "additionalProperties": False
-        }
-    }
-    
-    try:
-        async with aiohttp.ClientSession() as session:
-            result = await make_openai_request(session, prompt, schema, model)
-            return result
-    except Exception:
-        # Fallback: return headings found by regex
-        return {"sections": [{"heading": h, "subheadings": []} for h in headings]}
 
-async def extract_key_points_async(text: str, model: Optional[str] = None) -> List[str]:
-    """
-    Extracts key points from text using GPT-4.1-mini with async processing.
-    """
-    prompt = (
-        "Read the following document content and extract the most important key points, arguments, and findings. "
-        "Focus on main arguments, conclusions, and significant facts. "
-        "Document content:\n"
-        "-----\n"
-        f"{text[:6000]}\n"
-        "-----"
-    )
-    
-    schema = {
-        "name": "key_points",
-        "strict": True,
-        "schema": {
-            "type": "object",
-            "properties": {
-                "key_points": {
-                    "type": "array",
-                    "items": {"type": "string"}
-                }
-            },
-            "required": ["key_points"],
-            "additionalProperties": False
-        }
-    }
-    
-    try:
-        async with aiohttp.ClientSession() as session:
-            result = await make_openai_request(session, prompt, schema, model)
-            return result.get("key_points", [])
-    except Exception:
-        return []
+async def _analyze_chunk(session: aiohttp.ClientSession, chunk: str) -> Dict[str, Any]:
+	"""
+	Analyze a single text chunk to extract key points and a micro-summary.
+	"""
+	prompt = (
+		"You will analyze a chunk of a longer document. "
+		"Extract 5-10 concise key points and a 2-3 sentence micro_summary capturing the essence.\n\n"
+		f"Chunk:\n{chunk}\n\n"
+	)
+	schema = {
+		"name": "chunk_analysis",
+		"strict": True,
+		"schema": {
+			"type": "object",
+			"properties": {
+				"key_points": {"type": "array", "items": {"type": "string"}},
+				"micro_summary": {"type": "string"},
+			},
+			"required": ["key_points", "micro_summary"],
+			"additionalProperties": False,
+		},
+	}
+	result = await _openai_json_call(session, prompt, schema, max_tokens=500, temperature=0.2)
+	return {
+		"key_points": result.get("key_points", []),
+		"micro_summary": result.get("micro_summary", ""),
+	}
 
-async def generate_summary_async(text: str, summary_type: str = "medium", model: Optional[str] = None) -> str:
-    """
-    Generates document summary using GPT-4.1-mini with async processing.
-    """
-    length_guidance = {
-        "short": "2-3 sentences",
-        "medium": "1-2 paragraphs", 
-        "long": "3-4 paragraphs"
-    }
-    
-    prompt = (
-        f"Summarize the following document in {length_guidance.get(summary_type, 'medium length')}. "
-        "Focus on the main themes, arguments, and conclusions. "
-        "Document content:\n"
-        "-----\n"
-        f"{text[:6000]}\n"
-        "-----"
-    )
-    
-    schema = {
-        "name": "document_summary",
-        "strict": True,
-        "schema": {
-            "type": "object",
-            "properties": {
-                "summary": {"type": "string"}
-            },
-            "required": ["summary"],
-            "additionalProperties": False
-        }
-    }
-    
-    try:
-        async with aiohttp.ClientSession() as session:
-            result = await make_openai_request(session, prompt, schema, model)
-            return result.get("summary", "")
-    except Exception:
-        return ""
-
-async def identify_discussion_topics_async(text: str, model: Optional[str] = None) -> List[str]:
-    """
-    Identifies discussion topics using GPT-4.1-mini with async processing.
-    """
-    prompt = (
-        "Identify the most interesting and debatable topics from this document that would make for engaging podcast discussion. "
-        "Focus on controversial points, different perspectives, implications, and thought-provoking questions. "
-        "Document content:\n"
-        "-----\n"
-        f"{text[:6000]}\n"
-        "-----"
-    )
-    
-    schema = {
-        "name": "discussion_topics",
-        "strict": True,
-        "schema": {
-            "type": "object",
-            "properties": {
-                "topics": {
-                    "type": "array",
-                    "items": {"type": "string"}
-                }
-            },
-            "required": ["topics"],
-            "additionalProperties": False
-        }
-    }
-    
-    try:
-        async with aiohttp.ClientSession() as session:
-            result = await make_openai_request(session, prompt, schema, model)
-            return result.get("topics", [])
-    except Exception:
-        return []
-
-# Main async processing functions for multiple chunks
-
-async def analyze_document_structure_async(text_chunks: List[str]) -> Dict[str, Any]:
-    """
-    Analyze document structure from multiple text chunks concurrently.
-    """
-    if not text_chunks:
-        return {"sections": []}
-    
-    # Process chunks concurrently
-    tasks = [analyze_content_structure_async(chunk) for chunk in text_chunks]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    
-    # Merge results
-    all_sections = []
-    for result in results:
-        if isinstance(result, dict) and "sections" in result:
-            all_sections.extend(result["sections"])
-    
-    return {"sections": all_sections}
-
-async def extract_document_key_points_async(text_chunks: List[str]) -> List[str]:
-    """
-    Extract key points from multiple text chunks concurrently.
-    """
-    if not text_chunks:
-        return []
-    
-    # Process chunks concurrently
-    tasks = [extract_key_points_async(chunk) for chunk in text_chunks]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    
-    # Merge and deduplicate results
-    all_key_points = []
-    for result in results:
-        if isinstance(result, list):
-            all_key_points.extend(result)
-    
-    # Remove duplicates while preserving order
-    seen = set()
-    unique_points = []
-    for point in all_key_points:
-        if point not in seen:
-            seen.add(point)
-            unique_points.append(point)
-    
-    return unique_points
-
-async def generate_document_summary_async(text_chunks: List[str], summary_type: str = "medium") -> str:
-    """
-    Generate document summary from multiple text chunks.
-    Uses first chunk for summary to maintain coherence.
-    """
-    if not text_chunks:
-        return ""
-    
-    # Use the first (typically largest) chunk for summary
-    return await generate_summary_async(text_chunks[0], summary_type)
-
-async def identify_document_discussion_topics_async(text_chunks: List[str]) -> List[str]:
-    """
-    Identify discussion topics from multiple text chunks concurrently.
-    """
-    if not text_chunks:
-        return []
-    
-    # Process chunks concurrently
-    tasks = [identify_discussion_topics_async(chunk) for chunk in text_chunks]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    
-    # Merge and deduplicate results
-    all_topics = []
-    for result in results:
-        if isinstance(result, list):
-            all_topics.extend(result)
-    
-    # Remove duplicates while preserving order
-    seen = set()
-    unique_topics = []
-    for topic in all_topics:
-        if topic not in seen:
-            seen.add(topic)
-            unique_topics.append(topic)
-    
-    return unique_topics
 
 async def analyze_content_completely_async(text_chunks: List[str]) -> Dict[str, Any]:
-    """
-    Run all content analysis tasks concurrently for maximum speed.
-    """
-    if not text_chunks:
-        return {
-            "structure": {"sections": []},
-            "key_points": [],
-            "summary": "",
-            "topics": []
-        }
-    
-    # Run all analysis tasks concurrently
-    structure_task = analyze_document_structure_async(text_chunks)
-    key_points_task = extract_document_key_points_async(text_chunks)
-    summary_task = generate_document_summary_async(text_chunks, "medium")
-    topics_task = identify_document_discussion_topics_async(text_chunks)
-    
-    # Wait for all tasks to complete
-    structure, key_points, summary, topics = await asyncio.gather(
-        structure_task,
-        key_points_task,
-        summary_task,
-        topics_task,
-        return_exceptions=True
-    )
-    
-    # Handle exceptions gracefully
-    if isinstance(structure, Exception):
-        structure = {"sections": []}
-    if isinstance(key_points, Exception):
-        key_points = []
-    if isinstance(summary, Exception):
-        summary = ""
-    if isinstance(topics, Exception):
-        topics = []
-    
-    return {
-        "structure": structure,
-        "key_points": key_points,
-        "summary": summary,
-        "topics": topics
-    }
+	"""
+	Analyze all text chunks concurrently and produce an overall summary and merged key points.
+	Returns a dict with keys: key_points (List[str]), summary (str).
+	"""
+	if not text_chunks:
+		return {"key_points": [], "summary": ""}
 
-# Synchronous wrappers for backwards compatibility
-def analyze_document_structure(text_chunks: List[str]) -> Dict[str, Any]:
-    """Sync wrapper for analyze_document_structure_async"""
-    return asyncio.run(analyze_document_structure_async(text_chunks))
+	async with aiohttp.ClientSession() as session:
+		chunk_tasks = [
+			_analyze_chunk(session, chunk)
+			for chunk in text_chunks
+		]
+		chunk_results = await asyncio.gather(*chunk_tasks, return_exceptions=True)
 
-def extract_document_key_points(text_chunks: List[str]) -> List[str]:
-    """Sync wrapper for extract_document_key_points_async"""
-    return asyncio.run(extract_document_key_points_async(text_chunks))
+		all_points: List[str] = []
+		micro_summaries: List[str] = []
+		for res in chunk_results:
+			if isinstance(res, Exception):
+				continue
+			all_points.extend([p for p in res.get("key_points", []) if isinstance(p, str) and p.strip()])
+			if res.get("micro_summary"):
+				micro_summaries.append(res["micro_summary"]) 
 
-def generate_document_summary(text_chunks: List[str], summary_type: str = "medium") -> str:
-    """Sync wrapper for generate_document_summary_async"""
-    return asyncio.run(generate_document_summary_async(text_chunks, summary_type))
+		# Produce an overall summary from the micro summaries
+		overall_prompt = (
+			"You will receive multiple micro summaries from different parts of a single document. "
+			"Write a cohesive, 1-2 paragraph overall summary that captures the document's purpose, main arguments, and conclusions.\n\n"
+			f"Micro summaries:\n- " + "\n- ".join(micro_summaries[:30])
+		)
+		overall_schema = {
+			"name": "overall_summary",
+			"strict": True,
+			"schema": {
+				"type": "object",
+				"properties": {"summary": {"type": "string"}},
+				"required": ["summary"],
+				"additionalProperties": False,
+			},
+		}
+		try:
+			final = await _openai_json_call(session, overall_prompt, overall_schema, max_tokens=350, temperature=0.3)
+			summary_text = final.get("summary", "")
+		except Exception:
+			summary_text = "\n".join(micro_summaries[:5])
 
-def identify_document_discussion_topics(text_chunks: List[str]) -> List[str]:
-    """Sync wrapper for identify_document_discussion_topics_async"""
-    return asyncio.run(identify_document_discussion_topics_async(text_chunks))
+		# De-duplicate key points while preserving order
+		seen = set()
+		unique_points: List[str] = []
+		for p in all_points:
+			if p not in seen:
+				seen.add(p)
+				unique_points.append(p)
+
+		return {"key_points": unique_points[:30], "summary": summary_text.strip()}
+
+
+async def summarize_transcript_async(script: List[Dict[str, str]]) -> str:
+	"""
+	Summarize a full podcast transcript (list of {speaker, text}) as a concise overview:
+	- How the podcast starts
+	- Topic flow/segments in order
+	- Key takeaways and any disagreements
+	- How it concludes
+	Returns a markdown-formatted string suitable for UI/API.
+	"""
+	if not script:
+		return ""
+
+	# Trim very long transcripts by sampling turns while keeping order
+	max_turns = 300
+	selected = script[:max_turns]
+	transcript_text = "\n".join([f"{s.get('speaker', 'Host')}: {s.get('text', '').strip()}" for s in selected])
+
+	prompt = (
+		"Summarize the following podcast transcript for listeners who want context before listening. "
+		"Write 120-200 words. Include: how it opens, the progression of topics, notable points of agreement/disagreement, and how it wraps up. "
+		"Use neutral, engaging language and avoid spoilers for exact phrasing. Provide bullet points for topic flow.\n\n"
+		f"Transcript:\n{transcript_text}"
+	)
+
+	schema = {
+		"name": "podcast_summary",
+		"strict": True,
+		"schema": {
+			"type": "object",
+			"properties": {
+				"summary": {"type": "string"}
+			},
+			"required": ["summary"],
+			"additionalProperties": False
+		}
+	}
+
+	async with aiohttp.ClientSession() as session:
+		try:
+			result = await _openai_json_call(session, prompt, schema, max_tokens=300, temperature=0.4)
+			return result.get("summary", "").strip()
+		except Exception:
+			# Fallback: simple heuristic summary if API fails
+			opening = selected[0].get("text", "").strip() if selected else ""
+			closing = selected[-1].get("text", "").strip() if selected else ""
+			return (
+				"Podcast overview: a conversation that opens with "
+				+ (opening[:120] + ("…" if len(opening) > 120 else ""))
+				+ " … and concludes with "
+				+ (closing[:120] + ("…" if len(closing) > 120 else ""))
+			)

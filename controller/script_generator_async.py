@@ -81,6 +81,8 @@ async def generate_host_personas_async(podcast_topic: str, tone: str = "neutral"
         f"You are designing two podcast hosts for a show about '{podcast_topic}'. "
         f"The desired tone is '{tone}'. "
         f"Create two distinct and complementary host personas. "
+        f"IMPORTANT: Host 1 must be a MALE host with the name David"
+        f"Host 2 must be a FEMALE host with the name Emma"
         f"For each host, provide: name, background, personality traits, expertise level, and speaking style. "
         f"Ensure the hosts have different but compatible personalities and conversational styles. "
         f"Include some randomization for variety (seed: {seed})."
@@ -210,15 +212,74 @@ async def create_dialogue_script_async(
     }
     
     try:
-        # Use higher max_tokens for script generation
+        # Calculate appropriate max_tokens based on target length
+        # Rough estimate: 1.5 tokens per word + 20% buffer for JSON structure
+        estimated_tokens = int(target_words * 1.5 * 1.2)
+        # Ensure minimum of 2048 tokens and maximum of 8192 for safety
+        max_tokens = max(2048, min(estimated_tokens, 8192))
+        
+        # Debug: Save token calculation details
+        import json
+        from datetime import datetime
+        debug_script_data = {
+            "timestamp": datetime.now().isoformat(),
+            "input_params": {
+                "podcast_topic": podcast_topic,
+                "target_length_minutes": target_length_minutes,
+                "tone": tone,
+                "content_focus": content_focus,
+                "technical_level": technical_level,
+                "inclusion_of_humor": inclusion_of_humor
+            },
+            "calculations": {
+                "target_words": target_words,
+                "estimated_tokens": estimated_tokens,
+                "max_tokens_used": max_tokens,
+                "tokens_calculation": f"{target_words} words * 1.5 * 1.2 = {estimated_tokens}"
+            },
+            "prompt_length": len(prompt),
+            "prompt": prompt
+        }
+        
         async with aiohttp.ClientSession() as session:
             result = await make_openai_request(
                 session, prompt, schema, 
-                max_tokens=2048,  # More tokens for longer scripts
+                max_tokens=max_tokens,
                 temperature=0.7
             )
-            return result.get("script", [])
-    except Exception:
+            
+            script_output = result.get("script", [])
+            
+            # Debug: Add output analysis
+            total_output_words = sum(len(segment.get("text", "").split()) for segment in script_output)
+            debug_script_data["output_analysis"] = {
+                "num_segments": len(script_output),
+                "total_words": total_output_words,
+                "estimated_duration": total_output_words / 130,
+                "achievement_percentage": (total_output_words / target_words) * 100 if target_words > 0 else 0
+            }
+            
+            # Save debug file
+            debug_filename = f"debug_script_generation_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            with open(debug_filename, 'w') as f:
+                json.dump(debug_script_data, f, indent=2)
+            
+            return script_output
+    except Exception as e:
+        # Debug: Log any exceptions
+        import json
+        from datetime import datetime
+        error_debug = {
+            "timestamp": datetime.now().isoformat(),
+            "error": str(e),
+            "input_params": {
+                "podcast_topic": podcast_topic,
+                "target_length_minutes": target_length_minutes
+            }
+        }
+        error_filename = f"debug_script_error_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        with open(error_filename, 'w') as f:
+            json.dump(error_debug, f, indent=2)
         return []
 
 def format_script_for_tts(script: List[Dict[str, str]]) -> List[Dict[str, str]]:

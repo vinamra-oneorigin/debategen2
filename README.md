@@ -2,7 +2,7 @@
 
 **Transform any PDF document into an engaging AI-generated podcast debate between two hosts.**
 
-This is a production-ready, high-performance application that uses async processing to convert PDFs into professional-quality podcast discussions with AI-generated voices.
+This is a production-ready, high-performance application that uses async processing to convert PDFs into professional-quality podcast discussions with AI-generated voices. The application features both a FastAPI backend for programmatic access and a Gradio web interface for interactive use.
 
 ## ✨ Features
 
@@ -15,6 +15,11 @@ This is a production-ready, high-performance application that uses async process
 - **📱 Modern UI**: Clean, intuitive Gradio interface
 
 ## 🏗️ Architecture
+
+### **Dual Interface Design**
+- **FastAPI Backend** (`app.py`): Production-ready REST API with endpoints for podcast generation and PDF summarization
+- **Gradio Demo** (`gradio_demo.py`): Interactive web interface for easy testing and demonstration
+- **WebSocket Support**: Real-time voice chat functionality with VAD (Voice Activity Detection)
 
 ### **Async Processing Pipeline**
 ```
@@ -35,28 +40,19 @@ PDF Upload → Text Extraction → Content Analysis → Script Generation → Vo
 ### 1. **Installation with UV (Recommended)**
 ```bash
 # Clone or download this directory
-cd async_podcast
+cd debategen2
 
 # Install UV if not already installed
 pip install uv
 
 # Install dependencies with UV (faster and more reliable)
 uv sync
-
-# Or use the setup script
-python setup.py
-```
-
-### **Alternative: Traditional pip**
-```bash
-# Install dependencies with pip
-pip install -r requirements.txt
 ```
 
 ### 2. **Configuration**
 ```bash
-# Copy environment template
-cp .env.example .env
+# Create your environment file
+touch .env
 
 # Edit .env with your API keys
 nano .env
@@ -68,22 +64,23 @@ nano .env
 - **Voice IDs**: Get from your ElevenLabs voice library
 
 ### 3. **Launch**
+
+**For Gradio Demo Interface:**
 ```bash
-# Option 1: Use UV runner (recommended)
-python run.py
-
-# Option 2: Direct UV execution
-uv run python debate2.py
-
-# Option 3: Traditional method
-python debate2.py
+# Launch the interactive Gradio interface
+uv run gradio_demo.py
 ```
-
 Open your browser to: **http://localhost:7900**
+
+**For FastAPI Backend (Production):**
+```bash
+# Launch the FastAPI backend server
+uv run app.py
+```
 
 ## 🎛️ Usage
 
-### **Web Interface**
+### **Gradio Web Interface (gradio_demo.py)**
 1. **📄 Upload PDF**: Drag and drop any PDF document
 2. **⚙️ Configure Settings**:
    - **Voice Configuration**: Choose speaker genders
@@ -95,6 +92,21 @@ Open your browser to: **http://localhost:7900**
 3. **🚀 Generate**: Click "Generate Podcast" and watch progress
 4. **📥 Download**: Get your MP3 file when complete
 
+### **FastAPI Backend (app.py)**
+**Available Endpoints:**
+- `POST /generate-podcast`: Convert PDF to podcast audio file
+- `POST /summarize-pdf`: Get a summary of PDF content
+- `GET /health`: Health check endpoint
+- `WebSocket /ws/audio-chat`: Real-time voice chat with AI
+
+**API Documentation:** Visit `http://localhost:8000/docs` when running the backend
+
+### **WebSocket Voice Chat**
+Real-time voice conversation with AI using Voice Activity Detection (VAD):
+- Automatic speech detection and processing
+- Integration with Groq and ElevenLabs for fast responses
+- Support for conversation context and PDF content discussion
+
 ### **Example Output**
 - **File Size**: 5-15 MB (depending on length)
 - **Quality**: 192kbps MP3, professional audio levels
@@ -104,10 +116,11 @@ Open your browser to: **http://localhost:7900**
 ## 📁 Project Structure
 
 ```
-async_podcast/
-├── debate2.py                          # Main Gradio application
-├── run.py                              # UV-optimized runner
-├── setup.py                            # Setup script with UV support
+debategen2/
+├── app.py                              # FastAPI backend server
+├── gradio_demo.py                      # Gradio web interface
+├── voice_chat_websocket.py             # WebSocket voice chat functionality
+├── vad_utils.py                        # Voice Activity Detection utilities
 ├── controller/
 │   ├── config.py                       # Configuration management
 │   ├── utils.py                        # PDF processing utilities
@@ -115,11 +128,17 @@ async_podcast/
 │   ├── script_generator_async.py       # Async script generation
 │   ├── voice_generator_async.py        # Async voice synthesis
 │   └── audio_processor_async.py        # Async audio processing
+├── snakers4_silero-vad_master/         # VAD model files
+│   ├── files/
+│   │   ├── lang_dict_95.json
+│   │   ├── lang_group_dict_95.json
+│   │   ├── silero_vad.jit
+│   │   └── silero_vad.onnx
+│   ├── hubconf.py
+│   └── utils_vad.py
+├── output_audio/                       # Generated audio files
 ├── pyproject.toml                      # UV project configuration
 ├── uv.lock                             # UV lock file
-├── requirements.txt                    # Legacy pip dependencies
-├── .env.example                        # Environment template
-├── QUICKSTART.md                       # Quick start guide
 └── README.md                          # This file
 ```
 
@@ -193,7 +212,7 @@ ELEVENLABS_MODEL=eleven_flash_v2_5
 1. **"Missing API Keys"**: Ensure `.env` file has valid OpenAI and ElevenLabs keys
 2. **"PDF Processing Failed"**: Check PDF is text-based (not scanned image)
 3. **"Voice Generation Slow"**: Verify ElevenLabs API quota and voice IDs
-4. **"Port Already in Use"**: Change port in `debate2.py` (line 341)
+4. **"Port Already in Use"**: Change port in `gradio_demo.py` (line 478) or `app.py` (line 314)
 
 ### **Performance Tips**
 - **Shorter PDFs**: 5-20 pages work best for optimal speed
@@ -244,4 +263,13 @@ For issues or enhancements, check the main project repository or create a new is
 
 ---
 
-**🎉 Ready to transform your documents into engaging podcasts with UV!**
+**🎉 Ready to transform your documents into engaging podcasts!**
+
+### Quick Start Commands
+```bash
+# For interactive demo
+uv run gradio_demo.py
+
+# For production API
+uv run app.py
+```

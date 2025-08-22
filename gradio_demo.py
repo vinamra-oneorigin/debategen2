@@ -34,6 +34,9 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 # Access control
 ACCESS_PASSWORD = "podcast2024"  # Change this to your desired password
 
+# Global variable to store PDF content for simple chat
+PDF_CONTENT = ""
+
 async def process_pdf_to_podcast(
     pdf_file,
     voice_config: str,
@@ -48,7 +51,24 @@ async def process_pdf_to_podcast(
     Complete async pipeline to convert PDF to podcast.
     Returns (audio_file_path, status_message)
     """
+    import json
+    from datetime import datetime
+    
     start_time = time.time()
+    debug_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    debug_log = {
+        "timestamp": debug_timestamp,
+        "input_parameters": {
+            "pdf_filename": pdf_file.name if pdf_file else None,
+            "voice_config": voice_config,
+            "length_minutes": length_minutes,
+            "tone": tone,
+            "focus": focus,
+            "technical_level": technical_level,
+            "humor_level": humor_level
+        },
+        "stages": {}
+    }
     
     try:
         # Update progress
@@ -61,15 +81,37 @@ async def process_pdf_to_podcast(
         raw_text = extract_text_from_pdf(pdf_file.name)
         cleaned_text = clean_extracted_text(raw_text)
         
+        # Debug: Log text extraction
+        debug_log["stages"]["text_extraction"] = {
+            "raw_text_length": len(raw_text),
+            "cleaned_text_length": len(cleaned_text),
+            "cleaned_text_preview": cleaned_text[:500] + "..." if len(cleaned_text) > 500 else cleaned_text
+        }
+        
         if len(cleaned_text) < 100:
             return None, "Error: PDF contains insufficient text content"
         
         text_chunks = chunk_text_for_gpt(cleaned_text, max_tokens=4000)
         
+        # Debug: Log chunking
+        debug_log["stages"]["text_chunking"] = {
+            "num_chunks": len(text_chunks),
+            "chunk_lengths": [len(chunk) for chunk in text_chunks],
+            "total_chunk_chars": sum(len(chunk) for chunk in text_chunks)
+        }
+        
         progress(0.2, desc=f"Analyzing content ({len(text_chunks)} chunks)")
         
         # Step 2: Concurrent content analysis
         analysis = await analyze_content_completely_async(text_chunks)
+        
+        # Debug: Log content analysis
+        debug_log["stages"]["content_analysis"] = {
+            "num_key_points": len(analysis.get("key_points", [])),
+            "key_points": analysis.get("key_points", []),
+            "summary_length": len(analysis.get("summary", "")),
+            "summary": analysis.get("summary", "")
+        }
         
         if not analysis["key_points"] or not analysis["summary"]:
             return None, "Error: Failed to analyze PDF content"
@@ -78,6 +120,17 @@ async def process_pdf_to_podcast(
         
         # Step 3: Generate script
         topic_title = f"Discussion of {os.path.basename(pdf_file.name).replace('.pdf', '')}"
+        
+        # Debug: Log script generation inputs
+        debug_log["stages"]["script_generation_input"] = {
+            "topic_title": topic_title,
+            "target_length_minutes": length_minutes,
+            "target_words_calculated": length_minutes * 130,
+            "tone": tone,
+            "content_focus": focus,
+            "technical_level": technical_level,
+            "inclusion_of_humor": humor_level
+        }
         
         script_result = await generate_podcast_script_async(
             podcast_topic=topic_title,
@@ -93,6 +146,19 @@ async def process_pdf_to_podcast(
         
         script = script_result["script"]
         
+        # Debug: Log script generation output
+        total_script_words = sum(len(segment.get("text", "").split()) for segment in script)
+        debug_log["stages"]["script_generation_output"] = {
+            "num_segments": len(script),
+            "total_words": total_script_words,
+            "estimated_duration_minutes": total_script_words / 130,
+            "words_per_segment_avg": total_script_words / len(script) if script else 0,
+            "first_3_segments": script[:3] if len(script) >= 3 else script,
+            "last_3_segments": script[-3:] if len(script) >= 3 else script,
+            "personas": script_result.get("personas", {}),
+            "full_script": script
+        }
+        
         progress(0.6, desc=f"Generating voices ({len(script)} segments)")
         
         # Step 4: Create voice mapping
@@ -106,6 +172,13 @@ async def process_pdf_to_podcast(
             for i, speaker in enumerate(speakers):
                 voice_map[speaker] = 'female' if i % 2 == 0 else 'male'
         
+        # Debug: Log voice mapping
+        debug_log["stages"]["voice_mapping"] = {
+            "speakers": speakers,
+            "voice_config": voice_config,
+            "voice_map": voice_map
+        }
+        
         # Step 5: Generate audio concurrently
         audio_files = await process_dialogue_markers_async(
             script=script,
@@ -113,6 +186,12 @@ async def process_pdf_to_podcast(
             speed=1.0,
             output_format="mp3"
         )
+        
+        # Debug: Log audio generation
+        debug_log["stages"]["audio_generation"] = {
+            "num_audio_files": len(audio_files) if audio_files else 0,
+            "audio_files": audio_files or []
+        }
         
         if not audio_files:
             return None, "Error: Failed to generate audio segments"
@@ -144,6 +223,37 @@ async def process_pdf_to_podcast(
         total_time = time.time() - start_time
         file_size = os.path.getsize(final_audio_path) / (1024 * 1024)  # MB
         
+        # Debug: Log final results and calculate actual audio duration
+        try:
+            # Try to get actual audio duration using ffprobe
+            import subprocess
+            result = subprocess.run([
+                'ffprobe', '-i', final_audio_path, 
+                '-show_entries', 'format=duration', 
+                '-v', 'quiet', '-of', 'csv=p=0'
+            ], capture_output=True, text=True, check=True)
+            actual_duration_seconds = float(result.stdout.strip())
+            actual_duration_minutes = actual_duration_seconds / 60
+        except:
+            actual_duration_seconds = None
+            actual_duration_minutes = None
+        
+        debug_log["stages"]["final_results"] = {
+            "final_audio_path": final_audio_path,
+            "filename": filename,
+            "file_size_mb": file_size,
+            "processing_time_seconds": total_time,
+            "deleted_temp_files": deleted_count,
+            "actual_audio_duration_seconds": actual_duration_seconds,
+            "actual_audio_duration_minutes": actual_duration_minutes,
+            "target_vs_actual_ratio": (actual_duration_minutes / length_minutes) if actual_duration_minutes and length_minutes else None
+        }
+        
+        # Save debug log to file
+        debug_filename = f"debug_gradio_pipeline_{debug_timestamp}.json"
+        with open(debug_filename, 'w') as f:
+            json.dump(debug_log, f, indent=2, default=str)
+        
         progress(1.0, desc="Podcast generation complete")
         
         status_msg = (
@@ -152,9 +262,18 @@ async def process_pdf_to_podcast(
             f"**Size:** {file_size:.1f} MB\n"
             f"**Processing Time:** {total_time:.1f} seconds\n"
             f"**Segments:** {len(script)} dialogue turns\n"
+            f"**Script Words:** {total_script_words}\n"
+            f"**Target Duration:** {length_minutes} minutes\n"
+            f"**Actual Duration:** {actual_duration_minutes:.1f} minutes\n" if actual_duration_minutes else f"**Actual Duration:** Unknown\n"
+            f"**Achievement:** {(actual_duration_minutes/length_minutes)*100:.1f}%\n" if actual_duration_minutes and length_minutes else f"**Achievement:** Unknown\n"
             f"**Cleaned up:** {deleted_count} temporary files\n\n"
+            f"**Debug Log:** {debug_filename}\n"
             f"**Ready to download and listen**"
         )
+        
+        # Store PDF content for simple chat
+        global PDF_CONTENT
+        PDF_CONTENT = cleaned_text
         
         return final_audio_path, status_msg
         
@@ -177,6 +296,12 @@ def create_gradio_interface():
         }
         .progress-container {
             margin: 20px 0;
+        }
+        .audio-chat-section {
+            background-color: #f8f9fa;
+            padding: 20px;
+            border-radius: 10px;
+            margin-top: 20px;
         }
         """
     ) as app:
@@ -272,6 +397,8 @@ def create_gradio_interface():
                     interactive=False
                 )
         
+
+        
         # Event handlers
         def process_podcast(pdf_file, voice_cfg, length, tone, focus, tech_level, humor, password, progress=gr.Progress()):
             """Async wrapper for podcast processing with progress updates."""
@@ -322,8 +449,7 @@ def create_gradio_interface():
             ],
             show_progress=True
         )
-        
-    
+
     return app
 
 def main():
