@@ -23,6 +23,7 @@ from controller.script_generator_async import generate_podcast_script_async
 from controller.voice_generator_async import process_dialogue_markers_async
 from controller.audio_processor_async import (
     process_complete_audio_async,
+    process_complete_audio_with_transcript_async,
     cleanup_temp_files_async
 )
 
@@ -117,12 +118,13 @@ async def process_pdf_to_podcast(
         
         progress(0.4, desc="Generating podcast script")
         
-        # Step 3: Generate script
-        topic_title = f"Discussion of {os.path.basename(pdf_file.name).replace('.pdf', '')}"
+        # Step 3: Generate script - use actual PDF content instead of filename
+        topic_content = cleaned_text
         
         # Debug: Log script generation inputs
         debug_log["stages"]["script_generation_input"] = {
-            "topic_title": topic_title,
+            "topic_content_length": len(topic_content),
+            "topic_content_preview": topic_content[:200] + "..." if len(topic_content) > 200 else topic_content,
             "target_length_minutes": length_minutes,
             "target_words_calculated": length_minutes * 130,
             "tone": tone,
@@ -132,7 +134,7 @@ async def process_pdf_to_podcast(
         }
         
         script_result = await generate_podcast_script_async(
-            podcast_topic=topic_title,
+            podcast_topic=topic_content,
             target_length_minutes=length_minutes,
             tone=tone,
             content_focus=focus,
@@ -201,8 +203,9 @@ async def process_pdf_to_podcast(
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"podcast_{os.path.basename(pdf_file.name).replace('.pdf', '')}_{timestamp}"
         
-        final_audio_path = await process_complete_audio_async(
+        final_audio_path, transcript_path = await process_complete_audio_with_transcript_async(
             audio_paths=audio_files,
+            script=script,
             pause_ms=500,
             effects=["normalize"],
             output_filename=filename,
@@ -257,7 +260,8 @@ async def process_pdf_to_podcast(
         
         status_msg = (
             f"**Podcast Generated Successfully**\n\n"
-            f"**File:** {os.path.basename(final_audio_path)}\n"
+            f"**Audio File:** {os.path.basename(final_audio_path)}\n"
+            f"**Transcript File:** {os.path.basename(transcript_path) if transcript_path else 'Not generated'}\n"
             f"**Size:** {file_size:.1f} MB\n"
             f"**Processing Time:** {total_time:.1f} seconds\n"
             f"**Segments:** {len(script)} dialogue turns\n"
@@ -267,7 +271,8 @@ async def process_pdf_to_podcast(
             f"**Achievement:** {(actual_duration_minutes/length_minutes)*100:.1f}%\n" if actual_duration_minutes and length_minutes else f"**Achievement:** Unknown\n"
             f"**Cleaned up:** {deleted_count} temporary files\n\n"
             f"**Debug Log:** {debug_filename}\n"
-            f"**Ready to download and listen**"
+            f"**Ready to download and listen**\n\n"
+            f"**📄 Timestamped transcript saved with speaker timings!**"
         )
         
         # Store PDF content for simple chat

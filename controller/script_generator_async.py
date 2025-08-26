@@ -75,18 +75,39 @@ async def make_openai_request(
 async def generate_host_personas_async(podcast_topic: str, tone: str = "neutral") -> Dict[str, Any]:
     """
     Generates two distinct and complementary podcast host personas using GPT-4.1-mini async.
+    Now handles both topics (short) and full PDF content (long).
     """
     seed = random.randint(1000, 9999)
-    prompt = (
-        f"You are designing two podcast hosts for a show about '{podcast_topic}'. "
-        f"The desired tone is '{tone}'. "
-        f"Create two distinct and complementary host personas. "
-        f"IMPORTANT: Host 1 must be a MALE host with the name David"
-        f"Host 2 must be a FEMALE host with the name Emma"
-        f"For each host, provide: name, background, personality traits, expertise level, and speaking style. "
-        f"Ensure the hosts have different but compatible personalities and conversational styles. "
-        f"Include some randomization for variety (seed: {seed})."
-    )
+    
+    # Determine if we're dealing with a short topic or full content
+    is_full_content = len(podcast_topic) > 500
+    
+    if is_full_content:
+        # Truncate content for persona generation to avoid token limits
+        content_preview = podcast_topic[:1000] + "..." if len(podcast_topic) > 1000 else podcast_topic
+        prompt = (
+            f"You are designing two podcast hosts for a show discussing the following content: "
+            f"\n\n--- CONTENT PREVIEW ---\n{content_preview}\n--- END PREVIEW ---\n\n"
+            f"The desired tone is '{tone}'. "
+            f"Create two distinct and complementary host personas based on this content. "
+            f"IMPORTANT: Host 1 must be a MALE host with the name David. "
+            f"Host 2 must be a FEMALE host with the name Emma. "
+            f"For each host, provide: name, background, personality traits, expertise level, and speaking style. "
+            f"Ensure the hosts have different but compatible personalities and conversational styles. "
+            f"Include some randomization for variety (seed: {seed})."
+        )
+    else:
+        # Original behavior for short topics
+        prompt = (
+            f"You are designing two podcast hosts for a show about '{podcast_topic}'. "
+            f"The desired tone is '{tone}'. "
+            f"Create two distinct and complementary host personas. "
+            f"IMPORTANT: Host 1 must be a MALE host with the name David. "
+            f"Host 2 must be a FEMALE host with the name Emma. "
+            f"For each host, provide: name, background, personality traits, expertise level, and speaking style. "
+            f"Ensure the hosts have different but compatible personalities and conversational styles. "
+            f"Include some randomization for variety (seed: {seed})."
+        )
     
     schema = {
         "name": "host_personas",
@@ -166,26 +187,56 @@ async def create_dialogue_script_async(
     # Estimate target word count (approx 130 words per minute for spoken dialogue)
     target_words = int(target_length_minutes * 130)
     
-    prompt = (
-        f"You are to generate a podcast script for a show about '{podcast_topic}'.\n"
-        f"The desired tone is '{tone}'.\n"
-        f"Content focus: {content_focus}.\n"
-        f"Technical level: {technical_level}.\n"
-        f"Humor level: {inclusion_of_humor}/10.\n"
-        f"Target length: approximately {target_words} words total.\n\n"
-        f"Host 1: {host1['name']}\n"
-        f"Background: {host1['background']}\n"
-        f"Personality: {host1['personality_traits']}\n"
-        f"Speaking style: {host1['speaking_style']}\n\n"
-        f"Host 2: {host2['name']}\n"
-        f"Background: {host2['background']}\n"
-        f"Personality: {host2['personality_traits']}\n"
-        f"Speaking style: {host2['speaking_style']}\n\n"
-        f"Generate a natural, engaging dialogue between these two hosts. "
-        f"Include an introduction, main discussion points, and a conclusion. "
-        f"Make the conversation flow naturally with back-and-forth exchanges. "
-        f"Each turn should be 1-3 sentences for natural pacing."
-    )
+    # Determine if we're dealing with a short topic or full content
+    is_full_content = len(podcast_topic) > 500
+    
+    if is_full_content:
+        # For full content, provide a structured approach
+        content_preview = podcast_topic[:3000] + "..." if len(podcast_topic) > 3000 else podcast_topic
+        prompt = (
+            f"You are to generate a podcast script discussing the following content:\n\n"
+            f"--- CONTENT TO DISCUSS ---\n{content_preview}\n--- END CONTENT ---\n\n"
+            f"The desired tone is '{tone}'.\n"
+            f"Content focus: {content_focus}.\n"
+            f"Technical level: {technical_level}.\n"
+            f"Humor level: {inclusion_of_humor}/10.\n"
+            f"Target length: approximately {target_words} words total.\n\n"
+            f"Host 1: {host1['name']}\n"
+            f"Background: {host1['background']}\n"
+            f"Personality: {host1['personality_traits']}\n"
+            f"Speaking style: {host1['speaking_style']}\n\n"
+            f"Host 2: {host2['name']}\n"
+            f"Background: {host2['background']}\n"
+            f"Personality: {host2['personality_traits']}\n"
+            f"Speaking style: {host2['speaking_style']}\n\n"
+            f"Generate a natural, engaging dialogue between these two hosts discussing the content above. "
+            f"Include an introduction, main discussion points from the content, and a conclusion. "
+            f"Make the conversation flow naturally with back-and-forth exchanges. "
+            f"Each turn should be 1-3 sentences for natural pacing. "
+            f"Focus on the key insights, concepts, and interesting points from the provided content."
+        )
+    else:
+        # Original behavior for short topics
+        prompt = (
+            f"You are to generate a podcast script for a show about '{podcast_topic}'.\n"
+            f"The desired tone is '{tone}'.\n"
+            f"Content focus: {content_focus}.\n"
+            f"Technical level: {technical_level}.\n"
+            f"Humor level: {inclusion_of_humor}/10.\n"
+            f"Target length: approximately {target_words} words total.\n\n"
+            f"Host 1: {host1['name']}\n"
+            f"Background: {host1['background']}\n"
+            f"Personality: {host1['personality_traits']}\n"
+            f"Speaking style: {host1['speaking_style']}\n\n"
+            f"Host 2: {host2['name']}\n"
+            f"Background: {host2['background']}\n"
+            f"Personality: {host2['personality_traits']}\n"
+            f"Speaking style: {host2['speaking_style']}\n\n"
+            f"Generate a natural, engaging dialogue between these two hosts. "
+            f"Include an introduction, main discussion points, and a conclusion. "
+            f"Make the conversation flow naturally with back-and-forth exchanges. "
+            f"Each turn should be 1-3 sentences for natural pacing."
+        )
     
     schema = {
         "name": "dialogue_script",

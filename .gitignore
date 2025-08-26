@@ -3,3 +3,5 @@
 .junk
 *__pycache__*
 *.mp3
+transcripts/*
+data/*

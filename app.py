@@ -11,6 +11,7 @@ Provides REST endpoints for:
 import os
 import time
 import asyncio
+import hashlib
 from datetime import datetime
 from pathlib import Path
 
@@ -32,6 +33,7 @@ from controller.script_generator_async import generate_podcast_script_async
 from controller.voice_generator_async import process_dialogue_markers_async
 from controller.audio_processor_async import (
     process_complete_audio_async,
+    process_complete_audio_with_transcript_async,
     cleanup_temp_files_async
 )
 from voice_chat_websocket import router as audio_ws_router
@@ -39,8 +41,10 @@ from voice_chat_websocket import router as audio_ws_router
 # Configuration
 OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "output_audio")
 TEMP_DIR = os.path.join(os.path.dirname(__file__), "temp")
+PDF_STORAGE_DIR = os.path.join(os.path.dirname(__file__), "data", "pdfs")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 os.makedirs(TEMP_DIR, exist_ok=True)
+os.makedirs(PDF_STORAGE_DIR, exist_ok=True)
 
 # FastAPI app initialization
 app = FastAPI(
@@ -103,6 +107,80 @@ async def health_check():
         version="1.0.0"
     )
 
+@app.post("/upload-pdf")
+async def upload_pdf(
+    pdf_file: UploadFile = File(..., description="PDF file to upload")
+):
+    """
+    Upload a PDF file and return its hash. The PDF is stored with the hash as filename.
+    Returns: {"hash": "sha256_hash_string"}
+    """
+    try:
+        if not pdf_file.filename.lower().endswith('.pdf'):
+            raise HTTPException(status_code=400, detail="Only PDF files are supported")
+
+        # Read the PDF content
+        content = await pdf_file.read()
+        
+        if len(content) == 0:
+            raise HTTPException(status_code=400, detail="PDF file is empty")
+        
+        # Generate SHA256 hash of the PDF content
+        pdf_hash = hashlib.sha256(content).hexdigest()
+        
+        # Store the PDF with hash as filename
+        pdf_storage_path = os.path.join(PDF_STORAGE_DIR, f"{pdf_hash}.pdf")
+        
+        # Check if PDF already exists (deduplication)
+        if not os.path.exists(pdf_storage_path):
+            with open(pdf_storage_path, "wb") as f:
+                f.write(content)
+            print(f"Stored new PDF: {pdf_hash}.pdf")
+        else:
+            print(f"PDF already exists: {pdf_hash}.pdf")
+        
+        return JSONResponse(content={"hash": pdf_hash})
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+@app.post("/summarize-pdf/{hash_id}")
+async def summarize_pdf_by_hash(
+    hash_id: str,
+    background_tasks: BackgroundTasks
+):
+    """
+    Summarize a previously uploaded PDF using its hash ID.
+    Returns JSON with a single field: {"summary": string}.
+    """
+    try:
+        # Validate hash format (basic check)
+        if not hash_id or len(hash_id) != 64:
+            raise HTTPException(status_code=400, detail="Invalid hash format")
+        
+        # Check if PDF exists in storage
+        pdf_storage_path = os.path.join(PDF_STORAGE_DIR, f"{hash_id}.pdf")
+        if not os.path.exists(pdf_storage_path):
+            raise HTTPException(status_code=404, detail="PDF not found. Please upload the PDF first using /upload-pdf")
+
+        raw_text = extract_text_from_pdf(pdf_storage_path)
+        cleaned_text = clean_extracted_text(raw_text)
+        if len(cleaned_text) < 100:
+            raise HTTPException(status_code=400, detail="PDF contains insufficient text content")
+
+        text_chunks = chunk_text_for_gpt(cleaned_text, max_tokens=4000)
+        analysis = await analyze_content_completely_async(text_chunks)
+        if not analysis.get("summary"):
+            raise HTTPException(status_code=500, detail="Failed to summarize PDF content")
+
+        return JSONResponse(content={"summary": analysis.get("summary", "")})
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
 @app.post("/summarize-pdf")
 async def summarize_pdf(
     background_tasks: BackgroundTasks,
@@ -140,11 +218,11 @@ async def summarize_pdf(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
-@app.post("/generate-podcast")
+@app.post("/generate-podcast/{hash_id}")
 async def generate_podcast_file(
+    hash_id: str,
     background_tasks: BackgroundTasks,
     request: Request,
-    pdf_file: UploadFile = File(..., description="PDF file to convert to podcast"),
     voice_config: str = Form("male_female"),
     length_minutes: int = Form(25),
     tone: str = Form("engaging"),
@@ -153,19 +231,23 @@ async def generate_podcast_file(
     humor_level: int = Form(4)
 ):
     """
-    Generate a podcast from the uploaded PDF and return the MP3 file directly.
+    Generate a podcast from a previously uploaded PDF using its hash ID.
     Includes a concise transcript-derived summary in headers.
     """
     start_time = time.time()
 
     try:
-        if not pdf_file.filename.lower().endswith('.pdf'):
-            raise HTTPException(status_code=400, detail="Only PDF files are supported")
-
-        temp_pdf_path = os.path.join(TEMP_DIR, f"temp_{int(time.time())}_{pdf_file.filename}")
-        with open(temp_pdf_path, "wb") as buffer:
-            content = await pdf_file.read()
-            buffer.write(content)
+        # Validate hash format (basic check)
+        if not hash_id or len(hash_id) != 64:
+            raise HTTPException(status_code=400, detail="Invalid hash format")
+        
+        # Check if PDF exists in storage
+        pdf_storage_path = os.path.join(PDF_STORAGE_DIR, f"{hash_id}.pdf")
+        if not os.path.exists(pdf_storage_path):
+            raise HTTPException(status_code=404, detail="PDF not found. Please upload the PDF first using /upload-pdf")
+        
+        # Use the stored PDF directly
+        temp_pdf_path = pdf_storage_path
 
         raw_text = extract_text_from_pdf(temp_pdf_path)
         cleaned_text = clean_extracted_text(raw_text)
@@ -177,9 +259,10 @@ async def generate_podcast_file(
         if not analysis.get("summary"):
             raise HTTPException(status_code=500, detail="Failed to analyze PDF content")
 
-        topic_title = f"Discussion of {Path(pdf_file.filename).stem}"
+        # Use the actual PDF content as topic instead of a generic title
+        topic_content = cleaned_text
         script_result = await generate_podcast_script_async(
-            podcast_topic=topic_title,
+            podcast_topic=topic_content,
             target_length_minutes=length_minutes,
             tone=tone,
             content_focus=focus,
@@ -194,12 +277,19 @@ async def generate_podcast_file(
 
         speakers = list(set([segment.get('speaker', 'Unknown') for segment in script]))
         voice_map = {}
-        if voice_config == 'male_female':
-            for i, speaker in enumerate(speakers):
-                voice_map[speaker] = 'male' if i % 2 == 0 else 'female'
-        else:
-            for i, speaker in enumerate(speakers):
-                voice_map[speaker] = 'female' if i % 2 == 0 else 'male'
+        
+        # Use deterministic mapping based on speaker names to avoid swapping
+        for speaker in speakers:
+            if speaker == 'David':
+                voice_map[speaker] = 'male'
+            elif speaker == 'Emma':
+                voice_map[speaker] = 'female'
+            else:
+                # Fallback for any unexpected speaker names
+                if voice_config == 'male_female':
+                    voice_map[speaker] = 'male' if len([s for s in voice_map.values() if s == 'male']) == 0 else 'female'
+                else:  # female_male
+                    voice_map[speaker] = 'female' if len([s for s in voice_map.values() if s == 'female']) == 0 else 'male'
 
         audio_files = await process_dialogue_markers_async(
             script=script,
@@ -210,10 +300,10 @@ async def generate_podcast_file(
         if not audio_files:
             raise HTTPException(status_code=500, detail="Failed to generate audio segments")
 
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"podcast_{Path(pdf_file.filename).stem}_{timestamp}"
-        final_audio_path = await process_complete_audio_async(
+        filename = f"podcast_{hash_id}"
+        final_audio_path, transcript_path = await process_complete_audio_with_transcript_async(
             audio_paths=audio_files,
+            script=script,
             pause_ms=500,
             effects=["normalize"],
             output_filename=filename,
@@ -224,7 +314,7 @@ async def generate_podcast_file(
             raise HTTPException(status_code=500, detail="Failed to combine audio segments")
 
         background_tasks.add_task(cleanup_temp_files_async, audio_files)
-        background_tasks.add_task(lambda: os.remove(temp_pdf_path) if os.path.exists(temp_pdf_path) else None)
+        # Note: temp_pdf_path is actually the stored PDF, so we don't delete it
 
         total_time = time.time() - start_time
         file_size = os.path.getsize(final_audio_path) / (1024 * 1024)
@@ -237,6 +327,7 @@ async def generate_podcast_file(
                 "X-Processing-Time": str(round(total_time, 2)),
                 "X-Segments-Count": str(len(script)),
                 "X-File-Size-MB": str(round(file_size, 2)),
+                "X-Transcript-File": os.path.basename(transcript_path) if transcript_path else "not_generated",
             }
         )
 
