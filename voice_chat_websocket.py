@@ -774,9 +774,10 @@ async def transcribe_audio_groq(audio_bytes):
         with open(str(wav_path), "rb") as f:
             transcription = await client.audio.transcriptions.create(
                 file=f,
-                model="distil-whisper-large-v3-en",
+                model="whisper-large-v3-turbo",
                 response_format="verbose_json",
                 timestamp_granularities=["word", "segment"],
+                language="en"
             )
         text = getattr(transcription, "text", "") or ""
 
