@@ -19,7 +19,8 @@ from fastapi import FastAPI, File, UploadFile, HTTPException, Form, BackgroundTa
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from typing import Optional
 import uvicorn
 
 # Import existing controllers
@@ -74,6 +75,15 @@ class HealthResponse(BaseModel):
     status: str
     timestamp: str
     version: str
+
+class PodcastGenerationRequest(BaseModel):
+    voice_config: str = Field(default="male_female", description="Voice configuration for the podcast")
+    length_minutes: int = Field(default=10, description="Target length in minutes")
+    tone: str = Field(default="engaging", description="Tone of the podcast")
+    focus: str = Field(default="balanced", description="Content focus")
+    technical_level: str = Field(default="intermediate", description="Technical level")
+    humor_level: int = Field(default=4, description="Humor level (0-10)")
+    interests: Optional[str] = Field(default=None, description="User interests for contextualization")
 
 # Background task for cleanup
 async def cleanup_old_files():
@@ -221,14 +231,9 @@ async def summarize_pdf(
 @app.post("/generate-podcast/{hash_id}")
 async def generate_podcast_file(
     hash_id: str,
+    request_body: PodcastGenerationRequest,
     background_tasks: BackgroundTasks,
-    request: Request,
-    voice_config: str = Form("male_female"),
-    length_minutes: int = Form(25),
-    tone: str = Form("engaging"),
-    focus: str = Form("balanced"),
-    technical_level: str = Form("intermediate"),
-    humor_level: int = Form(4)
+    request: Request
 ):
     """
     Generate a podcast from a previously uploaded PDF using its hash ID.
@@ -263,11 +268,12 @@ async def generate_podcast_file(
         topic_content = cleaned_text
         script_result = await generate_podcast_script_async(
             podcast_topic=topic_content,
-            target_length_minutes=length_minutes,
-            tone=tone,
-            content_focus=focus,
-            technical_level=technical_level,
-            inclusion_of_humor=humor_level
+            target_length_minutes=request_body.length_minutes,
+            tone=request_body.tone,
+            content_focus=request_body.focus,
+            technical_level=request_body.technical_level,
+            inclusion_of_humor=request_body.humor_level,
+            interests=request_body.interests
         )
 
         if not script_result or not script_result.get("script"):
@@ -286,7 +292,7 @@ async def generate_podcast_file(
                 voice_map[speaker] = 'female'
             else:
                 # Fallback for any unexpected speaker names
-                if voice_config == 'male_female':
+                if request_body.voice_config == 'male_female':
                     voice_map[speaker] = 'male' if len([s for s in voice_map.values() if s == 'male']) == 0 else 'female'
                 else:  # female_male
                     voice_map[speaker] = 'female' if len([s for s in voice_map.values() if s == 'female']) == 0 else 'male'

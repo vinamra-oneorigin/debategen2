@@ -72,12 +72,22 @@ async def make_openai_request(
                 error_text = await response.text()
                 raise aiohttp.ClientError(f"OpenAI API failed: {response.status} {error_text}")
 
-async def generate_host_personas_async(podcast_topic: str, tone: str = "neutral") -> Dict[str, Any]:
+async def generate_host_personas_async(podcast_topic: str, tone: str = "neutral", interests: Optional[str] = None) -> Dict[str, Any]:
     """
     Generates two distinct and complementary podcast host personas using GPT-4.1-mini async.
     Now handles both topics (short) and full PDF content (long).
     """
     seed = random.randint(1000, 9999)
+    
+    # Parse interests if provided
+    interests_context = ""
+    if interests and interests.strip():
+        interests_list = [interest.strip() for interest in interests.split(",") if interest.strip()]
+        if interests_list:
+            interests_context = (
+                f" The audience has interests in: {', '.join(interests_list)}. "
+                f"Consider these interests when designing personas that can relate to these domains through analogies and examples when appropriate."
+            )
     
     # Determine if we're dealing with a short topic or full content
     is_full_content = len(podcast_topic) > 500
@@ -88,7 +98,7 @@ async def generate_host_personas_async(podcast_topic: str, tone: str = "neutral"
         prompt = (
             f"You are designing two podcast hosts for a show discussing the following content: "
             f"\n\n--- CONTENT PREVIEW ---\n{content_preview}\n--- END PREVIEW ---\n\n"
-            f"The desired tone is '{tone}'. "
+            f"The desired tone is '{tone}'.{interests_context} "
             f"Create two distinct and complementary host personas based on this content. "
             f"IMPORTANT: Host 1 must be a MALE host with the name David. "
             f"Host 2 must be a FEMALE host with the name Emma. "
@@ -100,7 +110,7 @@ async def generate_host_personas_async(podcast_topic: str, tone: str = "neutral"
         # Original behavior for short topics
         prompt = (
             f"You are designing two podcast hosts for a show about '{podcast_topic}'. "
-            f"The desired tone is '{tone}'. "
+            f"The desired tone is '{tone}'.{interests_context} "
             f"Create two distinct and complementary host personas. "
             f"IMPORTANT: Host 1 must be a MALE host with the name David. "
             f"Host 2 must be a FEMALE host with the name Emma. "
@@ -161,7 +171,8 @@ async def create_dialogue_script_async(
     tone: str = "neutral",
     content_focus: str = "educational",
     technical_level: str = "intermediate",
-    inclusion_of_humor: int = 0
+    inclusion_of_humor: int = 0,
+    interests: Optional[str] = None
 ) -> List[Dict[str, str]]:
     """
     Generates a conversational script between two hosts using GPT-4.1-mini async.
@@ -187,6 +198,20 @@ async def create_dialogue_script_async(
     # Estimate target word count (approx 130 words per minute for spoken dialogue)
     target_words = int(target_length_minutes * 130)
     
+    # Parse interests if provided
+    interests_instruction = ""
+    if interests and interests.strip():
+        interests_list = [interest.strip() for interest in interests.split(",") if interest.strip()]
+        if interests_list:
+            interests_instruction = (
+                f"\n\nIMPORTANT - INTERESTS CONTEXTUALIZATION:\n"
+                f"The listener has interests in: {', '.join(interests_list)}.\n"
+                f"Use these interests SPARINGLY to enhance explanations through relevant analogies, examples, and contextual references.\n"
+                f"Do NOT make these interests the main topic - they should only serve to make concepts more relatable and understandable.\n"
+                f"When explaining complex concepts, occasionally draw parallels from these domains when it naturally fits.\n"
+                f"Keep the focus on the main content while using these interests as bridges to understanding."
+            )
+    
     # Determine if we're dealing with a short topic or full content
     is_full_content = len(podcast_topic) > 500
     
@@ -209,6 +234,7 @@ async def create_dialogue_script_async(
             f"Background: {host2['background']}\n"
             f"Personality: {host2['personality_traits']}\n"
             f"Speaking style: {host2['speaking_style']}\n\n"
+            f"{interests_instruction}\n\n"
             f"Generate a natural, engaging dialogue between these two hosts discussing the content above. "
             f"Include an introduction, main discussion points from the content, and a conclusion. "
             f"Make the conversation flow naturally with back-and-forth exchanges. "
@@ -232,6 +258,7 @@ async def create_dialogue_script_async(
             f"Background: {host2['background']}\n"
             f"Personality: {host2['personality_traits']}\n"
             f"Speaking style: {host2['speaking_style']}\n\n"
+            f"{interests_instruction}\n\n"
             f"Generate a natural, engaging dialogue between these two hosts. "
             f"Include an introduction, main discussion points, and a conclusion. "
             f"Make the conversation flow naturally with back-and-forth exchanges. "
@@ -365,7 +392,8 @@ async def generate_podcast_script_async(
     tone: str = "engaging",
     content_focus: str = "balanced",
     technical_level: str = "general",
-    inclusion_of_humor: int = 2
+    inclusion_of_humor: int = 2,
+    interests: Optional[str] = None
 ) -> Optional[Dict[str, Any]]:
     """
     Complete async podcast script generation pipeline.
@@ -373,7 +401,7 @@ async def generate_podcast_script_async(
     """
     try:
         # Step 1: Generate host personas
-        personas = await generate_host_personas_async(podcast_topic, tone)
+        personas = await generate_host_personas_async(podcast_topic, tone, interests)
         
         if not personas:
             return None
@@ -386,7 +414,8 @@ async def generate_podcast_script_async(
             tone,
             content_focus,
             technical_level,
-            inclusion_of_humor
+            inclusion_of_humor,
+            interests
         )
         
         if not script:
@@ -405,9 +434,9 @@ async def generate_podcast_script_async(
         return None
 
 # Synchronous wrappers for backwards compatibility
-def generate_host_personas(podcast_topic: str, tone: str = "neutral") -> Dict[str, Any]:
+def generate_host_personas(podcast_topic: str, tone: str = "neutral", interests: Optional[str] = None) -> Dict[str, Any]:
     """Sync wrapper for generate_host_personas_async"""
-    return asyncio.run(generate_host_personas_async(podcast_topic, tone))
+    return asyncio.run(generate_host_personas_async(podcast_topic, tone, interests))
 
 def create_dialogue_script(
     host_personas: Dict[str, Any],
@@ -416,12 +445,13 @@ def create_dialogue_script(
     tone: str = "neutral",
     content_focus: str = "educational",
     technical_level: str = "intermediate",
-    inclusion_of_humor: int = 0
+    inclusion_of_humor: int = 0,
+    interests: Optional[str] = None
 ) -> List[Dict[str, str]]:
     """Sync wrapper for create_dialogue_script_async"""
     return asyncio.run(create_dialogue_script_async(
         host_personas, podcast_topic, target_length_minutes,
-        tone, content_focus, technical_level, inclusion_of_humor
+        tone, content_focus, technical_level, inclusion_of_humor, interests
     ))
 
 def generate_podcast_script(
@@ -430,10 +460,11 @@ def generate_podcast_script(
     tone: str = "engaging",
     content_focus: str = "balanced",
     technical_level: str = "general",
-    inclusion_of_humor: int = 2
+    inclusion_of_humor: int = 2,
+    interests: Optional[str] = None
 ) -> Optional[Dict[str, Any]]:
     """Sync wrapper for generate_podcast_script_async"""
     return asyncio.run(generate_podcast_script_async(
         podcast_topic, target_length_minutes, tone,
-        content_focus, technical_level, inclusion_of_humor
+        content_focus, technical_level, inclusion_of_humor, interests
     ))
