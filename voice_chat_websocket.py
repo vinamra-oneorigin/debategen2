@@ -20,6 +20,7 @@ import io
 from pydub import AudioSegment
 import traceback
 import glob
+from filler_manager import get_filler_manager, calculate_filler_duration
 router = APIRouter()
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
@@ -231,7 +232,7 @@ def find_closest_segment_and_extract_interactions(transcript_data, timestamp_ms)
         print(f"Error extracting interactions: {e}")
         return None, [], None
 
-async def generate_transcript_transition(summary, conversation_history, surrounding_interactions, paused_segment):
+async def generate_transcript_transition(summary, conversation_history, surrounding_interactions, paused_segment, session=None):
     """Generate AI conversation that smoothly transitions back to transcript content.
     
     Args:
@@ -239,6 +240,7 @@ async def generate_transcript_transition(summary, conversation_history, surround
         conversation_history (list): Previous conversation messages
         surrounding_interactions (list): The 8 surrounding segments from transcript
         paused_segment (dict): The segment where user paused (context only)
+        session (InteractionSession, optional): Session for speaker tracking
         
     Returns:
         tuple: (response_data, elevenlabs_audio, resume_timestamp_ms)
@@ -258,15 +260,39 @@ async def generate_transcript_transition(summary, conversation_history, surround
         paused_text = paused_segment.get("text", "")
         paused_timestamp = paused_segment.get("start_time_ms", 0)
         
+        # Get last speaker from conversation history for speaker continuity
+        last_conversation_speaker = None
+        if conversation_history:
+            last_conversation_speaker = conversation_history[-1].get("speaker")
+        elif session and session.last_speaker:
+            last_conversation_speaker = session.last_speaker
+            
         # Create a list of available transition segments with their IDs
+        # Filter out segments from the same speaker to avoid continuity issues
         available_segments = []
+        filtered_segments = []
+        
         for seg in surrounding_interactions:
-            available_segments.append({
+            segment_info = {
                 "id": seg.get("interaction_id", ""),
                 "speaker": seg.get("speaker", ""),
                 "text": seg.get("text", "")[:100] + "..." if len(seg.get("text", "")) > 100 else seg.get("text", ""),
                 "timestamp": seg.get("start_time_ms", 0)
-            })
+            }
+            available_segments.append(segment_info)
+            
+            # Filter for speaker continuity (different speaker than last conversation speaker)
+            if last_conversation_speaker and seg.get("speaker") != last_conversation_speaker:
+                filtered_segments.append(segment_info)
+        
+        # Use filtered segments if available, otherwise use all segments
+        transition_segments = filtered_segments if filtered_segments else available_segments
+        
+        if last_conversation_speaker:
+            print(f"🎯 Last conversation speaker: {last_conversation_speaker}")
+            print(f"🎯 Available segments: {len(available_segments)}, Filtered: {len(filtered_segments)}")
+        else:
+            print(f"🎯 No last speaker constraint, using all {len(available_segments)} segments")
         
         # Check if timestamp is near the end (less than 4 segments remaining)
         # Get total duration from transcript metadata, fallback to default
@@ -306,8 +332,17 @@ You MUST respond in this exact JSON format:
         else:
             available_segments_text = "\n".join([
                 f"ID: {seg['id']} | {seg['speaker']}: {seg['text']} (timestamp: {seg['timestamp']}ms)"
-                for seg in available_segments
+                for seg in transition_segments
             ])
+            
+            # Add speaker continuity note if filtering was applied
+            speaker_continuity_note = ""
+            if last_conversation_speaker and filtered_segments:
+                speaker_continuity_note = f"""
+SPEAKER CONTINUITY: The last speaker in our conversation was {last_conversation_speaker}.
+The available segments below have been filtered to exclude {last_conversation_speaker} 
+to ensure natural conversation flow.
+"""
             
             system_prompt = f"""You are David (male) and Emma (female), AI podcast hosts who were joined by the user as they wanted to ask a question. Now the users query has been answered and you need to smoothly transition back to the original podcast conversation.
 
@@ -325,7 +360,7 @@ PREVIOUS Q&A SESSION:
 
 AVAILABLE TRANSITION POINTS:
 {available_segments_text}
-
+{speaker_continuity_note}
 TASK:
 1. Thank the user for their questions
 2. Generate a natural conversation that smoothly transitions to ONE of the available segments above
@@ -437,6 +472,11 @@ Choose the segment that creates the smoothest, most natural transition from your
                                 speaker_messages.append({"speaker": speaker, "text": text})
                                 conversation_history.append({"speaker": speaker, "text": text})
                         
+                        # Update speaker state for transcript transition if session is available
+                        if session and speaker_messages:
+                            for msg in speaker_messages:
+                                session.update_speaker_state(msg["speaker"])
+                        
                         # Convert to audio
                         audio_messages = []
                         for resp in speaker_messages:
@@ -497,6 +537,12 @@ class InterractionSession:
         self.initial_timestamp_ms = None  # Timestamp where user paused the audio
         self.audio_id = None  # ID/name of the audio file being played
         self.resume_timestamp_ms = None  # Timestamp to resume audio playback
+        
+        # Speaker tracking system
+        self.last_speaker = None  # Track who spoke last globally
+        self.conversation_speaker_history = []  # Complete sequence of speakers
+        self.pending_next_speaker = None  # Who should speak next (for forced constraints)
+        self.filler_speaker = None  # Who gave the last filler (if any)
 
     def start_audio_blocking(self, duration_seconds):
         """Start blocking user audio for the specified duration.
@@ -519,6 +565,130 @@ class InterractionSession:
             self.audio_block_end_time = 0
             print("Audio blocking ended")
         return self.audio_blocking
+
+    def update_speaker_state(self, speaker):
+        """Update global speaker tracking after someone speaks.
+        
+        Args:
+            speaker (str): Either "David" or "Emma"
+        """
+        self.last_speaker = speaker
+        self.conversation_speaker_history.append(speaker)
+        # Clear pending constraint once fulfilled
+        if self.pending_next_speaker == speaker:
+            self.pending_next_speaker = None
+        print(f"🎯 Speaker state updated: last={self.last_speaker}, history={len(self.conversation_speaker_history)}")
+
+    def get_required_next_speaker(self):
+        """Get who should speak next based on current context.
+        
+        Returns:
+            str: "David" or "Emma", or None if no constraint
+        """
+        # If there's a pending constraint (e.g., from filler handoff), honor it
+        if self.pending_next_speaker:
+            print(f"🎯 Required next speaker (constraint): {self.pending_next_speaker}")
+            return self.pending_next_speaker
+        
+        # Default: no constraint, let LLM decide
+        return None
+
+    def set_next_speaker_requirement(self, speaker):
+        """Force a specific speaker to respond next.
+        
+        Args:
+            speaker (str): Either "David" or "Emma"
+        """
+        self.pending_next_speaker = speaker
+        print(f"🎯 Next speaker requirement set: {speaker}")
+
+    def get_opposite_speaker(self, speaker=None):
+        """Get the opposite persona.
+        
+        Args:
+            speaker (str, optional): Current speaker. If None, uses last_speaker.
+            
+        Returns:
+            str: The opposite speaker
+        """
+        if speaker is None:
+            speaker = self.last_speaker
+        
+        if speaker == "David":
+            return "Emma"
+        elif speaker == "Emma":
+            return "David"
+        else:
+            # Default to David if unknown
+            return "David"
+
+    def validate_speaker_sequence(self, proposed_responses):
+        """Validate that the proposed speaker sequence makes sense.
+        
+        Args:
+            proposed_responses (list): List of response objects with 'speaker' field
+            
+        Returns:
+            bool: True if sequence is valid, False otherwise
+        """
+        if not proposed_responses:
+            return True
+            
+        first_speaker = proposed_responses[0].get('speaker')
+        required_speaker = self.get_required_next_speaker()
+        
+        if required_speaker and first_speaker != required_speaker:
+            print(f"❌ Speaker sequence violation: expected {required_speaker}, got {first_speaker}")
+            return False
+            
+        print(f"✅ Speaker sequence valid: {first_speaker} can speak first")
+        return True
+
+    def should_send_filler(self, transcribed_text):
+        """Determine if a filler should be sent before the main response.
+        
+        Args:
+            transcribed_text (str): The user's transcribed question
+            
+        Returns:
+            bool: True if filler should be sent
+        """
+        # Send filler if:
+        # - Not the first interaction (user already introduced)
+        # - Question is substantial (>3 words)
+        # - Not a simple yes/no response
+        # - Not currently processing another response
+        
+        if not self.introduced:
+            return False
+            
+        if self.processing:
+            return False
+            
+        words = transcribed_text.strip().split()
+        if len(words) <= 3:
+            return False
+            
+        # Don't send filler for simple responses
+        simple_responses = ["yes", "no", "okay", "ok", "thanks", "thank you"]
+        if transcribed_text.lower().strip() in simple_responses:
+            return False
+            
+        return True
+
+    def get_filler_speaker(self):
+        """Determine who should give the filler response.
+        
+        Returns:
+            str: "David" or "Emma" - the speaker who should give the filler
+        """
+        # Alternate filler speaker from the last main response speaker
+        # This creates natural handoff patterns
+        if self.last_speaker:
+            return self.get_opposite_speaker(self.last_speaker)
+        else:
+            # Default to David for first interaction
+            return "David"
 
     async def push_audio(self, audio_bytes):
         if not self.summary :
@@ -543,6 +713,10 @@ class InterractionSession:
                 {"speaker": "David", "text": "Whoa, looks like somebody wants to join the conversation!"},
                 {"speaker": "Emma", "text": "Amazing! Let's let them in!"}
             ])
+            
+            # Update speaker state for introduction
+            self.update_speaker_state("David")  # David speaks first
+            self.update_speaker_state("Emma")   # Then Emma
             
             # Send combined audio of both AI introductions to the user
             greeting_audio_base64, greeting_audio_data = await generate_combined_ai_speech_with_elevenlabs(greeting_messages)
@@ -593,6 +767,48 @@ class InterractionSession:
 
             transcribed_text = await transcribe_audio_groq(b''.join(self.data_array))
             print("transcribing")
+            
+            # Check if we should send a filler first
+            filler_manager = get_filler_manager()
+            if self.should_send_filler(transcribed_text) and filler_manager.is_available():
+                # Send filler immediately for better perceived latency
+                filler_speaker = self.get_filler_speaker()
+                target_speaker = self.get_opposite_speaker(filler_speaker)
+                
+                print(f"🎬 Sending filler from {filler_speaker}, targeting {target_speaker}")
+                
+                filler_result = filler_manager.get_random_filler(filler_speaker)
+                print(f"filler_result: {filler_result}")
+                if filler_result:
+                    filler_base64, filler_raw = filler_result
+                    
+                    # Update speaker state and set constraint for main response
+                    self.update_speaker_state(filler_speaker)
+                    self.set_next_speaker_requirement(target_speaker)
+                    self.filler_speaker = filler_speaker
+                    
+                    # Calculate filler duration and start blocking
+                    filler_duration = calculate_filler_duration(filler_raw)
+                    self.start_audio_blocking(filler_duration)
+                    
+                    # Send filler audio
+                    filler_message = {
+                        "type": "filler_response",
+                        "audio": {
+                            "base64Wav": filler_base64
+                        }
+                    }
+                    print(f"📤 SENDING FILLER RESPONSE from {filler_speaker} (Connection ID: {id(self.websocket)})")
+                    await self.websocket.send_text(json.dumps(filler_message))
+                    
+                    # Add filler to conversation history with enhanced context
+                    # This gives the LLM better understanding of the handoff that occurred
+                    self.conversation.append({
+                        "speaker": filler_speaker, 
+                        "text": f"{filler_speaker} acknowledges the user's question and asks {target_speaker} to handle the response"
+                    })
+            
+            # Generate main LLM response
             llm_response, elevenlabs_respons = await generate_podcast_response(self.summary, self.conversation, transcribed_text, session=self) 
             
             if llm_response.get("disconnect_trigger") :
@@ -820,7 +1036,7 @@ async def generate_podcast_response(summary, conversation_history, user_question
                 if paused_segment_with_id and interactions_with_ids:
                     print(f"User paused at segment: {paused_segment_with_id.get('text', '')[:50]}...")
                     response_data, elevenlabs_audio, resume_timestamp_ms = await generate_transcript_transition(
-                        summary, conversation_history, interactions_with_ids, paused_segment_with_id
+                        summary, conversation_history, interactions_with_ids, paused_segment_with_id, session=session
                     )
                     
                     # Add resume timestamp to response
@@ -832,10 +1048,19 @@ async def generate_podcast_response(summary, conversation_history, user_question
         # Original conversation flow
         conversation_text = "\n".join([f"{msg['speaker']}: {msg['text']}" for msg in conversation_history])
         
+        # Get speaker constraints
+        required_speaker = session.get_required_next_speaker() if session else None
+        speaker_constraint_text = ""
+        if required_speaker:
+            speaker_constraint_text = f"""
+CRITICAL SPEAKER REQUIREMENT: {required_speaker} MUST speak first in your response.
+This is required because the conversation flow demands {required_speaker} to respond next.
+"""
+        
         system_prompt = f"""You are David (male) and Emma (female), two AI podcast hosts who were already having an engaging conversation about this topic: {summary}
 
 You were interrupted when someone joined to ask a question. Now respond naturally as if you were continuing your conversation, but also address the user's question.
-
+{speaker_constraint_text}
 IMPORTANT RULES:
 1. Both David and Emma should respond naturally and conversationally
 2. They should acknowledge the user joining their ongoing conversation
@@ -888,8 +1113,8 @@ Behave and talk in a casual light hearted manner and not in a robotic way.
             "response_format": {"type": "json_object"}
         }
         
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
+        async with aiohttp.ClientSession() as http_session:
+            async with http_session.post(
                 "https://api.openai.com/v1/chat/completions",
                 headers=headers,
                 json=payload,
@@ -912,6 +1137,15 @@ Behave and talk in a casual light hearted manner and not in a robotic way.
                                 speaker_messages.append({"speaker": speaker, "text": text})
                                 conversation_history.append({"speaker": speaker, "text": text})
                         
+                        # Validate speaker sequence if session is available
+                        if session and speaker_messages:
+                            if not session.validate_speaker_sequence(speaker_messages):
+                                print("⚠️  Speaker sequence validation failed, but proceeding...")
+                            
+                            # Update speaker state for each speaker in the response
+                            for msg in speaker_messages:
+                                session.update_speaker_state(msg["speaker"])
+                        
                         # Convert speaker messages to audio
                         audio_messages = []
                         for resp in speaker_messages:
@@ -924,12 +1158,8 @@ Behave and talk in a casual light hearted manner and not in a robotic way.
                     except json.JSONDecodeError as e:
                         print(f"JSON parsing error: {e}")
                         return {}, ""
-                else:
-                    return []
     except Exception as e:
         print(f"Response generation error: {e}")
-        return []
-
 
 async def generate_combined_ai_speech_with_elevenlabs(messages):
     """Generate combined audio from multiple AI personas using ElevenLabs.
