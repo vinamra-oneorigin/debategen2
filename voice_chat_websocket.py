@@ -20,6 +20,7 @@ import io
 from pydub import AudioSegment
 import traceback
 import glob
+import random
 router = APIRouter()
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
@@ -52,6 +53,84 @@ class ConnectionManager:
             print(f"⚠️  ATTEMPTED TO DISCONNECT UNKNOWN WEBSOCKET (ID: {id(websocket)})")
 
 manager = ConnectionManager()
+
+def is_question(text):
+    """Check if the input text is a question by looking for question words.
+    
+    Args:
+        text (str): The user's input text
+        
+    Returns:
+        bool: True if the text appears to be a question, False otherwise
+    """
+    if not text:
+        return False
+    
+    text_lower = text.lower().strip()
+    
+    # Question words to look for
+    question_words = [
+        'what', 'why', 'how', 'when', 'who', 'where', 'which', 'whose',
+        'can', 'could', 'would', 'should', 'will', 'do', 'does', 'did',
+        'is', 'was', 'were', 'have', 'has', 'had'
+    ]
+    
+    # Check if text ends with question mark
+    if text_lower.endswith('?'):
+        return True
+    
+    # Check if any question word appears in the text
+    for word in question_words:
+        if word in text_lower:
+            return True
+    
+    return False
+
+def get_filler_audio_path(speaker):
+    """Get a random filler audio file path for the specified speaker.
+    
+    Args:
+        speaker (str): Either "David" or "Emma"
+        
+    Returns:
+        str: Path to a random filler audio file for the speaker, or None if not found
+    """
+    try:
+        speaker_prefix = speaker.lower()
+        filler_files = glob.glob(f"filler_audio/{speaker_prefix}_filler_*.mp3")
+        
+        if filler_files:
+            return random.choice(filler_files)
+        else:
+            print(f"No filler audio files found for speaker: {speaker}")
+            return None
+    except Exception as e:
+        print(f"Error getting filler audio path for {speaker}: {e}")
+        return None
+
+def load_filler_audio(speaker):
+    """Load and encode filler audio for the specified speaker.
+    
+    Args:
+        speaker (str): Either "David" or "Emma"
+        
+    Returns:
+        tuple: (base64_encoded_audio, raw_audio_data) or (None, None) if failed
+    """
+    try:
+        filler_path = get_filler_audio_path(speaker)
+        if not filler_path:
+            return None, None
+        
+        with open(filler_path, 'rb') as f:
+            audio_data = f.read()
+        
+        base64_audio = base64.b64encode(audio_data).decode('utf-8')
+        print(f"Loaded filler audio for {speaker}: {filler_path}")
+        return base64_audio, audio_data
+    except Exception as e:
+        print(f"Error loading filler audio for {speaker}: {e}")
+        return None, None
 
 def parse_timestamp_to_ms(timestamp):
     """Parse timestamp in MM:SS.mmm format to milliseconds.
@@ -331,6 +410,7 @@ TASK:
 2. Generate a natural conversation that smoothly transitions to ONE of the available segments above
 3. Choose which segment ID makes the most sense to transition to.
 4. Make sure the transition you make feel natural and conversational. Ask yourself what could be possibly said which could lead to someone saying *the chosen segue point*
+5. CRITICAL SPEAKER ALTERNATION RULE: After generating your responses, choose a transition segment from the speaker who did NOT speak last in your generated responses. If Emma speaks last in your responses, choose a segment where David is speaking. If David speaks last, choose a segment where Emma is speaking. This ensures proper speaker alternation.
 
 You MUST respond in this exact JSON format:
 {{
@@ -497,6 +577,8 @@ class InterractionSession:
         self.initial_timestamp_ms = None  # Timestamp where user paused the audio
         self.audio_id = None  # ID/name of the audio file being played
         self.resume_timestamp_ms = None  # Timestamp to resume audio playback
+        # Speaker alternation tracking
+        self.who_started_speaking_last = "David"  # Track who spoke first in the last interaction, initialized to David since intro starts with David
 
     def start_audio_blocking(self, duration_seconds):
         """Start blocking user audio for the specified duration.
@@ -662,10 +744,15 @@ class InterractionSession:
                 "type": "resume_timestamp",
                 "timestamp_ms": self.resume_timestamp_ms
             }
+            resume_payload = json.dumps(resume_message)
             print(f"📤 SENDING RESUME TIMESTAMP BEFORE CLOSE (Connection ID: {id(self.websocket)})")
             print(f"   Resume timestamp: {self.resume_timestamp_ms}ms")
             print(f"   Resume message: {resume_message}")
-            await self.websocket.send_text(json.dumps(resume_message))
+            print(f"   PRE-DISCONNECT MESSAGE: {resume_message}")
+            print(f"   PRE-DISCONNECT PAYLOAD: {resume_payload}")
+            await self.websocket.send_text(resume_payload)
+        else:
+            print(f"   NO RESUME TIMESTAMP TO SEND - resume_timestamp_ms: {getattr(self, 'resume_timestamp_ms', 'NOT_SET')}")
         
         print(f"❌ WEBSOCKET CLOSING NOW (Connection ID: {id(self.websocket)})")
         await self.websocket.close()
@@ -774,7 +861,7 @@ async def transcribe_audio_groq(audio_bytes):
         with open(str(wav_path), "rb") as f:
             transcription = await client.audio.transcriptions.create(
                 file=f,
-                model="whisper-large-v3-turbo",
+                model="whisper-large-v3",
                 response_format="verbose_json",
                 timestamp_granularities=["word", "segment"],
                 language="en"
@@ -798,6 +885,31 @@ async def transcribe_audio_groq(audio_bytes):
 async def generate_podcast_response(summary, conversation_history, user_question, session):
     """Generate response from both AI personas using GPT."""
     try:
+        # Check if user input is a question and play filler audio if needed
+        if is_question(user_question):
+            print(f"🎵 Question detected: '{user_question}' - Playing filler from {session.who_started_speaking_last}")
+            filler_base64, filler_raw = load_filler_audio(session.who_started_speaking_last)
+            
+            if filler_base64:
+                # Add half-second delay before filler audio
+                print("⏳ Adding 0.5 second delay before filler audio")
+                await asyncio.sleep(2.5)
+                
+                # Calculate filler audio duration and start blocking
+                if filler_raw:
+                    filler_duration = calculate_audio_duration(filler_raw)
+                    session.start_audio_blocking(filler_duration)
+                
+                # Send filler audio after delay
+                filler_message = {
+                    "type": "response",
+                    "audio": {
+                        "base64Wav": filler_base64
+                    }
+                }
+                print(f"📤 SENDING FILLER AUDIO from {session.who_started_speaking_last}")
+                await session.websocket.send_text(json.dumps(filler_message))
+        
         # Check if user is indicating they want to end the conversation
         end_indicators = [
             "no more questions", "i'm done", "that's all", "no thanks", 
@@ -833,6 +945,10 @@ async def generate_podcast_response(summary, conversation_history, user_question
         # Original conversation flow
         conversation_text = "\n".join([f"{msg['speaker']}: {msg['text']}" for msg in conversation_history])
         
+        # Determine who should speak first (opposite of who started speaking last)
+        first_speaker = "Emma" if session.who_started_speaking_last == "David" else "David"
+        second_speaker = "David" if first_speaker == "Emma" else "Emma"
+        
         system_prompt = f"""You are David (male) and Emma (female), two AI podcast hosts who were already having an engaging conversation about this topic: {summary}
 
 You were interrupted when someone joined to ask a question. Now respond naturally as if you were continuing your conversation, but also address the user's question.
@@ -848,6 +964,8 @@ IMPORTANT RULES:
 8. When the user has no more questions, you are to end the conversation. However when ending the conversation, follow this script:
     david: okay then. Im glad we could answer your questions. Now lets get back to what we were talking about
     emma: amazing.
+9. CRITICAL: {first_speaker} must speak first in your response, then {second_speaker} should respond second. This ensures proper alternation between the hosts.
+
 User's question: {user_question}
 
 Previous conversation context:
@@ -857,12 +975,12 @@ You MUST respond in this exact JSON format:
 {{
     "responses": [
         {{
-            "speaker": "David",
-            "text": "David's response here"
+            "speaker": "{first_speaker}",
+            "text": "{first_speaker}'s response here"
         }},
         {{
-            "speaker": "Emma", 
-            "text": "Emma's response here"
+            "speaker": "{second_speaker}", 
+            "text": "{second_speaker}'s response here"
         }}
     ],
     "disconnect_trigger": false
@@ -912,6 +1030,11 @@ Behave and talk in a casual light hearted manner and not in a robotic way.
                             if speaker and text:
                                 speaker_messages.append({"speaker": speaker, "text": text})
                                 conversation_history.append({"speaker": speaker, "text": text})
+                        
+                        # Update who_started_speaking_last based on the first speaker in this response
+                        if speaker_messages:
+                            session.who_started_speaking_last = speaker_messages[0]["speaker"]
+                            print(f"Updated who_started_speaking_last to: {session.who_started_speaking_last}")
                         
                         # Convert speaker messages to audio
                         audio_messages = []
