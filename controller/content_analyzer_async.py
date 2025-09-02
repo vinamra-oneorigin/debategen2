@@ -127,62 +127,101 @@ async def _analyze_chunk(session: aiohttp.ClientSession, chunk: str) -> Dict[str
 	}
 
 
+
 async def analyze_content_completely_async(text_chunks: List[str]) -> Dict[str, Any]:
-	"""
-	Analyze all text chunks concurrently and produce an overall summary and merged key points.
-	Returns a dict with keys: key_points (List[str]), summary (str).
-	"""
-	if not text_chunks:
-		return {"key_points": [], "summary": ""}
+    """
+    Analyze all text chunks concurrently and produce an overall summary and merged key points.
+    Uses hierarchical summarization if there are too many micro summaries.
+    Returns a dict with keys: key_points (List[str]), summary (str).
+    """
+    if not text_chunks:
+        return {"key_points": [], "summary": ""}
 
-	async with aiohttp.ClientSession() as session:
-		chunk_tasks = [
-			_analyze_chunk(session, chunk)
-			for chunk in text_chunks
-		]
-		chunk_results = await asyncio.gather(*chunk_tasks, return_exceptions=True)
+    async with aiohttp.ClientSession() as session:
+        # Run all chunk analyses concurrently
+        chunk_tasks = [_analyze_chunk(session, chunk) for chunk in text_chunks]
+        chunk_results = await asyncio.gather(*chunk_tasks, return_exceptions=True)
 
-		all_points: List[str] = []
-		micro_summaries: List[str] = []
-		for res in chunk_results:
-			if isinstance(res, Exception):
-				continue
-			all_points.extend([p for p in res.get("key_points", []) if isinstance(p, str) and p.strip()])
-			if res.get("micro_summary"):
-				micro_summaries.append(res["micro_summary"]) 
+        all_points: List[str] = []
+        micro_summaries: List[str] = []
 
-		# Produce an overall summary from the micro summaries
-		overall_prompt = (
-			"You will receive multiple micro summaries from different parts of a single document. "
-			"Write a cohesive, 1-2 paragraph overall summary that captures the document's purpose, main arguments, and conclusions.\n\n"
-			f"Micro summaries:\n- " + "\n- ".join(micro_summaries[:30])
-		)
-		overall_schema = {
-			"name": "overall_summary",
-			"strict": True,
-			"schema": {
-				"type": "object",
-				"properties": {"summary": {"type": "string"}},
-				"required": ["summary"],
-				"additionalProperties": False,
-			},
-		}
-		try:
-			final = await _openai_json_call(session, overall_prompt, overall_schema, max_tokens=350, temperature=0.3)
-			summary_text = final.get("summary", "")
-		except Exception:
-			summary_text = "\n".join(micro_summaries[:5])
+        for res in chunk_results:
+            if isinstance(res, Exception):
+                continue
+            all_points.extend([
+                p for p in res.get("key_points", [])
+                if isinstance(p, str) and p.strip()
+            ])
+            if res.get("micro_summary"):
+                micro_summaries.append(res["micro_summary"])
 
-		# De-duplicate key points while preserving order
-		seen = set()
-		unique_points: List[str] = []
-		for p in all_points:
-			if p not in seen:
-				seen.add(p)
-				unique_points.append(p)
+        # If too many micro summaries, merge them hierarchically
+        def chunk_list(lst, size):
+            for i in range(0, len(lst), size):
+                yield lst[i:i+size]
 
-		return {"key_points": unique_points[:30], "summary": summary_text.strip()}
+        async def summarize_batch(batch: List[str]) -> str:
+            prompt = (
+                "You will receive several micro summaries from a section of a document. "
+                "Condense them into 1-2 sentences capturing the key ideas.\n\n"
+                f"Micro summaries:\n- " + "\n- ".join(batch)
+            )
+            schema = {
+                "name": "batch_summary",
+                "strict": True,
+                "schema": {
+                    "type": "object",
+                    "properties": {"summary": {"type": "string"}},
+                    "required": ["summary"],
+                    "additionalProperties": False,
+                },
+            }
+            try:
+                result = await _openai_json_call(session, prompt, schema, max_tokens=200, temperature=0.3)
+                return result.get("summary", "")
+            except Exception:
+                return " ".join(batch[:2])  # fallback
 
+        # Hierarchical merge if more than 30 micro summaries
+        batch_size = 20
+        if len(micro_summaries) > batch_size:
+            batch_summaries = []
+            for batch in chunk_list(micro_summaries, batch_size):
+                merged = await summarize_batch(batch)
+                batch_summaries.append(merged)
+            micro_summaries = batch_summaries  # replace with condensed versions
+
+        # Now produce the overall summary
+        overall_prompt = (
+            "You will receive multiple micro summaries from different parts of a single document. "
+            "Write a cohesive, 1-2 paragraph overall summary that captures the document's purpose, main arguments, and conclusions.\n\n"
+            f"Micro summaries:\n- " + "\n- ".join(micro_summaries)
+        )
+        overall_schema = {
+            "name": "overall_summary",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "properties": {"summary": {"type": "string"}},
+                "required": ["summary"],
+                "additionalProperties": False,
+            },
+        }
+        try:
+            final = await _openai_json_call(session, overall_prompt, overall_schema, max_tokens=350, temperature=0.3)
+            summary_text = final.get("summary", "")
+        except Exception:
+            summary_text = "\n".join(micro_summaries[:5])
+
+        # De-duplicate key points while preserving order
+        seen = set()
+        unique_points: List[str] = []
+        for p in all_points:
+            if p not in seen:
+                seen.add(p)
+                unique_points.append(p)
+
+        return {"key_points": unique_points, "summary": summary_text.strip()}
 
 async def summarize_transcript_async(script: List[Dict[str, str]]) -> str:
 	"""

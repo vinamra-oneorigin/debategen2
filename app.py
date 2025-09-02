@@ -10,12 +10,10 @@ Provides REST endpoints for:
 
 import os
 import time
-import asyncio
 import hashlib
 from datetime import datetime
-from pathlib import Path
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Form, BackgroundTasks, Request
+from fastapi import FastAPI, File, UploadFile, HTTPException, BackgroundTasks, Request
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -37,6 +35,7 @@ from controller.audio_processor_async import (
     process_complete_audio_with_transcript_async,
     cleanup_temp_files_async
 )
+from controller.filler_generator_async import generate_fresh_fillers_async
 from voice_chat_websocket import router as audio_ws_router
 
 # Configuration
@@ -178,7 +177,7 @@ async def summarize_pdf_by_hash(
         raw_text = extract_text_from_pdf(pdf_storage_path)
         cleaned_text = clean_extracted_text(raw_text)
         if len(cleaned_text) < 100:
-            raise HTTPException(status_code=400, detail="PDF contains insufficient text content")
+            return JSONResponse(content={"summary": cleaned_text})
 
         text_chunks = chunk_text_for_gpt(cleaned_text, max_tokens=4000)
         analysis = await analyze_content_completely_async(text_chunks)
@@ -232,8 +231,7 @@ async def summarize_pdf(
 async def generate_podcast_file(
     hash_id: str,
     request_body: PodcastGenerationRequest,
-    background_tasks: BackgroundTasks,
-    request: Request
+    background_tasks: BackgroundTasks
 ):
     """
     Generate a podcast from a previously uploaded PDF using its hash ID.
@@ -251,6 +249,9 @@ async def generate_podcast_file(
         if not os.path.exists(pdf_storage_path):
             raise HTTPException(status_code=404, detail="PDF not found. Please upload the PDF first using /upload-pdf")
         
+        # Generate fresh filler audio files for future use
+        background_tasks.add_task(generate_fresh_fillers_async)
+
         # Use the stored PDF directly
         temp_pdf_path = pdf_storage_path
 

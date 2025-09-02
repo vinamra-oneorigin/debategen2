@@ -310,7 +310,7 @@ def find_closest_segment_and_extract_interactions(transcript_data, timestamp_ms)
         print(f"Error extracting interactions: {e}")
         return None, [], None
 
-async def generate_transcript_transition(summary, conversation_history, surrounding_interactions, paused_segment):
+async def generate_transcript_transition(summary, conversation_history, surrounding_interactions, paused_segment, user_input):
     """Generate AI conversation that smoothly transitions back to transcript content.
     
     Args:
@@ -359,19 +359,19 @@ async def generate_transcript_transition(summary, conversation_history, surround
         time_remaining_ms = total_duration_ms - paused_timestamp
         
         # If less than 30 seconds remaining, just end normally
-        if time_remaining_ms < 30000:
+        if time_remaining_ms < 10000:
             system_prompt = f"""You are David (male) and Emma (female), AI podcast hosts ending a conversation with a user.
 
-The user has indicated they have no more questions and the podcast is near the end. 
+The user input is: {user_input} and the podcast is near the end. 
 
-Respond naturally to wrap up the conversation and thank the user for joining.
+Respond naturally to the message the user sent and wrap up the conversation and thank the user for joining.
 
 You MUST respond in this exact JSON format:
 {{
     "responses": [
         {{
             "speaker": "David",
-            "text": "Great! I'm glad we could answer your questions. Thanks for joining our conversation!"
+            "text": "Great! Question. That's because the length is measured in inches not centimeters. I hope that answers your question. Well Anyway Thanks for joining the conversation!"
         }},
         {{
             "speaker": "Emma", 
@@ -382,34 +382,37 @@ You MUST respond in this exact JSON format:
     "resume_timestamp_ms": null,
     "target_segment_id": null
 }}"""
+        #TODO: here resume_timestamp  should be complete uration of the podcast
+
         else:
             available_segments_text = "\n".join([
                 f"ID: {seg['id']} | {seg['speaker']}: {seg['text']} (timestamp: {seg['timestamp']}ms)"
                 for seg in available_segments
             ])
             
-            system_prompt = f"""You are David (male) and Emma (female), AI podcast hosts who were joined by the user as they wanted to ask a question. Now the users query has been answered and you need to smoothly transition back to the original podcast conversation.
+            system_prompt = f"""You are David (male) and Emma (female), AI podcast hosts who were joined by the user. First, answer their question/comment naturally, then smoothly transition back to the original podcast conversation.
 
 CONTEXT:
 - You were having a conversation about: {summary}
-- A user joined and asked questions, but now they're done
+- A user joined with a question/comment
 - User paused the podcast at: "{paused_text}" (spoken by {paused_speaker})
-- You need to generate a smooth segue back to the podcast
+- You need to answer their message . The user input is: {user_input} 
+- Answer this question and then transition back to the podcast
+
+USER'S MESSAGE/QUESTION:
+{user_input}
 
 SURROUNDING CONVERSATION CONTEXT:
 {interactions_text}
-
-PREVIOUS Q&A SESSION:
-{conversation_text}
 
 AVAILABLE TRANSITION POINTS:
 {available_segments_text}
 
 TASK:
-1. Thank the user for their questions
-2. Generate a natural conversation that smoothly transitions to ONE of the available segments above
-3. Choose which segment ID makes the most sense to transition to.
-4. Make sure the transition you make feel natural and conversational. Ask yourself what could be possibly said which could lead to someone saying *the chosen segue point*
+1. First, properly address and answer the user's question/comment from their message
+2. Then naturally transition the conversation to ONE of the available segments above
+3. Choose which segment ID makes the most sense to transition to
+4. Make sure both the answer and transition feel natural and conversational
 5. CRITICAL SPEAKER ALTERNATION RULE: After generating your responses, choose a transition segment from the speaker who did NOT speak last in your generated responses. If Emma speaks last in your responses, choose a segment where David is speaking. If David speaks last, choose a segment where Emma is speaking. This ensures proper speaker alternation.
 
 You MUST respond in this exact JSON format:
@@ -443,10 +446,9 @@ Emma: It's fascinating how this challenged classical wave theory
 PREVIOUS Q&A SESSION:
 David: Whoa, looks like somebody wants to join the conversation!
 Emma: Amazing! Let's let them in!
+
 User: Can you explain how light can be both a wave and particle?
-David: Great question! This is called wave-particle duality...
-Emma: Think of it like light having two different personalities...
-User: Oh okay I get it now. Thanks.
+
 
 AVAILABLE TRANSITION POINTS:
 ID: seg_3 | Emma: This discovery showed that light behaves like particles (timestamp: 45000ms)
@@ -458,11 +460,11 @@ GOOD RESPONSE:
     "responses": [
         {{
             "speaker": "David",
-            "text": "I'm so glad we could help explain wave-particle duality! Those are exactly the kinds of questions that make physics exciting."
+            "text": "Think of it like light having two different personalities... Its called wave-particle duality."
         }},
         {{
             "speaker": "Emma", 
-            "text": "Absolutely! Now, coming back to what we were discussing - this discovery about photons really was groundbreaking. David, you were explaining how the energy depends on frequency?"
+            "text": "Absolutely! I hope that answers your question. Now, coming back to what we were discussing - this discovery about photons really was groundbreaking. David, you were explaining how the energy depends on frequency?"
         }}
     ],
     "disconnect_trigger": true,
@@ -885,43 +887,36 @@ async def transcribe_audio_groq(audio_bytes):
 async def generate_podcast_response(summary, conversation_history, user_question, session):
     """Generate response from both AI personas using GPT."""
     try:
-        # Check if user input is a question and play filler audio if needed
-        if is_question(user_question):
-            print(f"🎵 Question detected: '{user_question}' - Playing filler from {session.who_started_speaking_last}")
-            filler_base64, filler_raw = load_filler_audio(session.who_started_speaking_last)
+        # Play filler audio for any user message
+        # Use the opposite speaker for filler to ensure proper alternation
+        filler_speaker = "David" if session.who_started_speaking_last == "Emma" else "Emma"
+        print(f"🎵 User message received: '{user_question}' - Playing filler from {filler_speaker}")
+        filler_base64, filler_raw = load_filler_audio(filler_speaker)
+        
+        if filler_base64:
+            # Add half-second delay before filler audio
+            print("⏳ Adding 0.5 second delay before filler audio")
+            await asyncio.sleep(2.5)
             
-            if filler_base64:
-                # Add half-second delay before filler audio
-                print("⏳ Adding 0.5 second delay before filler audio")
-                await asyncio.sleep(2.5)
-                
-                # Calculate filler audio duration and start blocking
-                if filler_raw:
-                    filler_duration = calculate_audio_duration(filler_raw)
-                    session.start_audio_blocking(filler_duration)
-                
-                # Send filler audio after delay
-                filler_message = {
-                    "type": "response",
-                    "audio": {
-                        "base64Wav": filler_base64
-                    }
+            # Calculate filler audio duration and start blocking
+            if filler_raw:
+                filler_duration = calculate_audio_duration(filler_raw)
+                session.start_audio_blocking(filler_duration)
+            
+            # Send filler audio after delay
+            filler_message = {
+                "type": "response",
+                "audio": {
+                    "base64Wav": filler_base64
                 }
-                print(f"📤 SENDING FILLER AUDIO from {session.who_started_speaking_last}")
-                await session.websocket.send_text(json.dumps(filler_message))
+            }
+            print(f"📤 SENDING FILLER AUDIO from {filler_speaker}")
+            await session.websocket.send_text(json.dumps(filler_message))
         
-        # Check if user is indicating they want to end the conversation
-        end_indicators = [
-            "no more questions", "i'm done", "that's all", "no thanks", 
-            "i don't have", "no i don't", "thank you", "thanks", "i'm good",
-            "that's it", "nothing else", "all good"
-        ]
-        
-        user_wants_to_end = any(indicator in user_question.lower() for indicator in end_indicators)
-        
-        # If user wants to end and we have session data for transcript transition
-        if user_wants_to_end and session and session.initial_timestamp_ms and session.audio_id:
-            print(f"🔄 USER WANTS TO END CONVERSATION - TRIGGERING TRANSCRIPT TRANSITION (Connection ID: {id(session.websocket)})")
+        # Since user is only allowed one message, always trigger transcript transition
+        # This is the ONLY response path since disconnect_trigger is always True
+        if session and session.initial_timestamp_ms and session.audio_id:
+            print(f"🔄 USER SENT MESSAGE - TRIGGERING TRANSCRIPT TRANSITION (Connection ID: {id(session.websocket)})")
             
             # Load transcript and find transition point
             transcript_data = load_transcript_by_audio_id(session.audio_id)
@@ -933,127 +928,20 @@ async def generate_podcast_response(summary, conversation_history, user_question
                 if paused_segment_with_id and interactions_with_ids:
                     print(f"User paused at segment: {paused_segment_with_id.get('text', '')[:50]}...")
                     response_data, elevenlabs_audio, resume_timestamp_ms = await generate_transcript_transition(
-                        summary, conversation_history, interactions_with_ids, paused_segment_with_id
+                        summary, conversation_history, interactions_with_ids, paused_segment_with_id, user_question
                     )
                     
                     # Add resume timestamp to response
                     if resume_timestamp_ms:
                         response_data["resume_timestamp_ms"] = resume_timestamp_ms
                     
+                    response_data["disconnect_trigger"] = True
+
                     return response_data, elevenlabs_audio
-        
-        # Original conversation flow
-        conversation_text = "\n".join([f"{msg['speaker']}: {msg['text']}" for msg in conversation_history])
-        
-        # Determine who should speak first (opposite of who started speaking last)
-        first_speaker = "Emma" if session.who_started_speaking_last == "David" else "David"
-        second_speaker = "David" if first_speaker == "Emma" else "Emma"
-        
-        system_prompt = f"""You are David (male) and Emma (female), two AI podcast hosts who were already having an engaging conversation about this topic: {summary}
-
-You were interrupted when someone joined to ask a question. Now respond naturally as if you were continuing your conversation, but also address the user's question.
-
-IMPORTANT RULES:
-1. Both David and Emma should respond naturally and conversationally
-2. They should acknowledge the user joining their ongoing conversation
-3. Answer the user's question in an engaging, podcast-like manner
-4. After answering, one of you should ask if the user has any more questions
-5. If the user says "no" or indicates they don't have more questions, set disconnect_trigger to true
-6. Keep responses natural and conversational, like real podcast hosts
-7. You can have a short back-and-forth between yourselves before asking about more questions or even have only one of you respond
-8. When the user has no more questions, you are to end the conversation. However when ending the conversation, follow this script:
-    david: okay then. Im glad we could answer your questions. Now lets get back to what we were talking about
-    emma: amazing.
-9. CRITICAL: {first_speaker} must speak first in your response, then {second_speaker} should respond second. This ensures proper alternation between the hosts.
-
-User's question: {user_question}
-
-Previous conversation context:
-{conversation_text}
-
-You MUST respond in this exact JSON format:
-{{
-    "responses": [
-        {{
-            "speaker": "{first_speaker}",
-            "text": "{first_speaker}'s response here"
-        }},
-        {{
-            "speaker": "{second_speaker}", 
-            "text": "{second_speaker}'s response here"
-        }}
-    ],
-    "disconnect_trigger": false
-}}
-make sure to set disconnect_trigger to true if the user indicates they don't have more questions and follow the ending conversation script provided above.
-Behave and talk in a casual light hearted manner and not in a robotic way.
-"""
-
-        headers = {
-            "Authorization": f"Bearer {get_openai_api_key()}",
-            "Content-Type": "application/json"
-        }
-        
-        payload = {
-            "model": "gpt-4o-mini",
-            "messages": [
-                {
-                    "role": "system",
-                    "content": system_prompt
-                }
-            ],
-            "max_tokens": 300,
-            "temperature": 0.8,
-            "response_format": {"type": "json_object"}
-        }
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers=headers,
-                json=payload,
-                timeout=30
-            ) as response:
-                if response.status == 200:
-                    result = await response.json()
-                    response_content = result["choices"][0]["message"]["content"].strip()
-                    
-                    # Parse JSON response
-                    try:
-                        response_data = json.loads(response_content)
-
-                        # Extract speaker messages
-                        speaker_messages = []
-                        for resp in response_data.get("responses", []):
-                            speaker = resp.get("speaker", "")
-                            text = resp.get("text", "")
-                            if speaker and text:
-                                speaker_messages.append({"speaker": speaker, "text": text})
-                                conversation_history.append({"speaker": speaker, "text": text})
-                        
-                        # Update who_started_speaking_last based on the first speaker in this response
-                        if speaker_messages:
-                            session.who_started_speaking_last = speaker_messages[0]["speaker"]
-                            print(f"Updated who_started_speaking_last to: {session.who_started_speaking_last}")
-                        
-                        # Convert speaker messages to audio
-                        audio_messages = []
-                        for resp in speaker_messages:
-                            voice = "male" if resp["speaker"] == "David" else "female"
-                            audio_messages.append({"text": resp["text"], "voice": voice})
-                        
-                        elevenlabs_response_audio, _ = await generate_combined_ai_speech_with_elevenlabs(audio_messages)
-                        
-                        return response_data, elevenlabs_response_audio
-                    except json.JSONDecodeError as e:
-                        print(f"JSON parsing error: {e}")
-                        return {}, ""
-                else:
-                    return []
+       
     except Exception as e:
         print(f"Response generation error: {e}")
         return []
-
 
 async def generate_combined_ai_speech_with_elevenlabs(messages):
     """Generate combined audio from multiple AI personas using ElevenLabs.
