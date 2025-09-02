@@ -18,7 +18,7 @@ from controller.voice_generator_async import generate_speech_segment_async
 # Predefined filler text lists for each speaker (4 fillers each)
 DAVID_FILLERS = [
     "Hey there! Glad to have you here. Emma do you want to take this one?",  # david_filler_1.mp3
-    "Good Point! You've raised a very interesting point there. Emma what do you think about this ?",  # david_filler_2.mp3
+    "Good Point! You've raised a very interesting question there. Emma what do you think about this ?",  # david_filler_2.mp3
     "Hmm.. Interesting Question. Let's hear Emma's take on that.",  # david_filler_3.mp3
     "Good Question! Emma you're really good with this topic."   # david_filler_4.mp3 (if needed)
 ]

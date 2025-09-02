@@ -310,7 +310,7 @@ def find_closest_segment_and_extract_interactions(transcript_data, timestamp_ms)
         print(f"Error extracting interactions: {e}")
         return None, [], None
 
-async def generate_transcript_transition(summary, conversation_history, surrounding_interactions, paused_segment, user_input):
+async def generate_transcript_transition(summary, conversation_history, surrounding_interactions, paused_segment, user_input, next_speaker):
     """Generate AI conversation that smoothly transitions back to transcript content.
     
     Args:
@@ -370,11 +370,11 @@ You MUST respond in this exact JSON format:
 {{
     "responses": [
         {{
-            "speaker": "David",
+            "speaker": "Emma",
             "text": "Great! Question. That's because the length is measured in inches not centimeters. I hope that answers your question. Well Anyway Thanks for joining the conversation!"
         }},
         {{
-            "speaker": "Emma", 
+            "speaker": "David", 
             "text": "Yes, it was wonderful having you! Enjoy the rest of your day. Goodbye."
         }}
     ],
@@ -385,6 +385,7 @@ You MUST respond in this exact JSON format:
         #TODO: here resume_timestamp  should be complete uration of the podcast
 
         else:
+            second_speaker = "Emma" if next_speaker == "David" else "David"
             available_segments_text = "\n".join([
                 f"ID: {seg['id']} | {seg['speaker']}: {seg['text']} (timestamp: {seg['timestamp']}ms)"
                 for seg in available_segments
@@ -414,20 +415,25 @@ TASK:
 3. Choose which segment ID makes the most sense to transition to
 4. Make sure both the answer and transition feel natural and conversational
 5. CRITICAL SPEAKER ALTERNATION RULE: After generating your responses, choose a transition segment from the speaker who did NOT speak last in your generated responses. If Emma speaks last in your responses, choose a segment where David is speaking. If David speaks last, choose a segment where Emma is speaking. This ensures proper speaker alternation.
-
+6. Note that the first speaker in the interaction you generate should be {next_speaker}
+7. You are allowed more to one interactions if the second speaker is also the speaker you want to transition to. in which case it is allowed for there to be a 3rd message where the first speaker REDIRECTS TO THE TRANSITION POINT of the 2nd speaker speaking in the original podcast.
 You MUST respond in this exact JSON format:
+if first_speaker is {next_speaker} and second_speaker is {second_speaker}
 {{
     "responses": [
         {{
-            "speaker": "David",
-            "text": "David's response here"
+            "speaker": "{next_speaker}",
+            "text": "response here"
         }},
         {{
-            "speaker": "Emma", 
-            "text": "Emma's response here"
-        }}
+            "speaker": "{second_speaker}", 
+            "text": "response here"
+        }},
+        {{
+            "speaker": "{next_speaker}",
+            "text": "response here"
+        }} //optional
     ],
-    "disconnect_trigger": true,
     "chosen_segment_id": "seg_X"
 }}
 
@@ -449,6 +455,7 @@ Emma: Amazing! Let's let them in!
 
 User: Can you explain how light can be both a wave and particle?
 
+first_speaker is David and second_speaker is Emma
 
 AVAILABLE TRANSITION POINTS:
 ID: seg_3 | Emma: This discovery showed that light behaves like particles (timestamp: 45000ms)
@@ -467,7 +474,6 @@ GOOD RESPONSE:
             "text": "Absolutely! I hope that answers your question. Now, coming back to what we were discussing - this discovery about photons really was groundbreaking. David, you were explaining how the energy depends on frequency?"
         }}
     ],
-    "disconnect_trigger": true,
     "chosen_segment_id": "seg_4"
 }}
 
@@ -889,10 +895,10 @@ async def generate_podcast_response(summary, conversation_history, user_question
     try:
         # Play filler audio for any user message
         # Use the opposite speaker for filler to ensure proper alternation
-        filler_speaker = "David" if session.who_started_speaking_last == "Emma" else "Emma"
+        filler_speaker = random.choice(["David", "Emma"])
         print(f"🎵 User message received: '{user_question}' - Playing filler from {filler_speaker}")
         filler_base64, filler_raw = load_filler_audio(filler_speaker)
-        
+        next_speaker = "David" if filler_speaker == "Emma" else "Emma"
         if filler_base64:
             # Add half-second delay before filler audio
             print("⏳ Adding 0.5 second delay before filler audio")
@@ -928,7 +934,7 @@ async def generate_podcast_response(summary, conversation_history, user_question
                 if paused_segment_with_id and interactions_with_ids:
                     print(f"User paused at segment: {paused_segment_with_id.get('text', '')[:50]}...")
                     response_data, elevenlabs_audio, resume_timestamp_ms = await generate_transcript_transition(
-                        summary, conversation_history, interactions_with_ids, paused_segment_with_id, user_question
+                        summary, conversation_history, interactions_with_ids, paused_segment_with_id, user_question, next_speaker
                     )
                     
                     # Add resume timestamp to response
